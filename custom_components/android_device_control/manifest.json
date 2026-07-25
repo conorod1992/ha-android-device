@@ -1,0 +1,13 @@
+{
+  "domain": "android_device_control",
+  "name": "Android Device Control",
+  "codeowners": ["@conorod1992"],
+  "config_flow": true,
+  "dependencies": ["mobile_app"],
+  "documentation": "https://github.com/conorod1992/ha-android-device",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/conorod1992/ha-android-device/issues",
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

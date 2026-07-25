@@ -1,0 +1,314 @@
+set_ringer_mode:
+  fields:
+    device_id: &device_field
+      required: true
+      selector:
+        device:
+          integration: mobile_app
+          multiple: true
+    mode:
+      required: true
+      selector:
+        select:
+          translation_key: ringer_mode
+          options: [normal, vibrate, silent]
+
+set_volume:
+  fields:
+    device_id: *device_field
+    stream:
+      required: true
+      selector:
+        select:
+          translation_key: volume_stream
+          options: [alarm, call, dtmf, media, notification, ring, system, assistant]
+    level:
+      required: true
+      selector:
+        number:
+          min: 0
+          mode: box
+
+set_do_not_disturb:
+  fields:
+    device_id: *device_field
+    mode:
+      required: true
+      selector:
+        select:
+          translation_key: dnd_mode
+          options: ["off", priority_only, alarms_only, total_silence]
+
+media_control:
+  fields:
+    device_id: *device_field
+    media_command:
+      required: true
+      selector:
+        select:
+          translation_key: media_command
+          options: [play, pause, play_pause, stop, next, previous, fast_forward, rewind]
+    package_name:
+      required: true
+      example: com.spotify.music
+      selector:
+        text:
+
+stop_tts:
+  fields:
+    device_id: *device_field
+
+turn_screen_on:
+  fields:
+    device_id: *device_field
+    keep_screen_on:
+      default: false
+      selector:
+        boolean:
+
+set_screen_brightness:
+  fields:
+    device_id: *device_field
+    level:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: slider
+
+set_auto_brightness:
+  fields:
+    device_id: *device_field
+    enabled: &enabled_field
+      required: true
+      selector:
+        boolean:
+
+set_screen_timeout:
+  fields:
+    device_id: *device_field
+    duration:
+      required: true
+      selector:
+        duration:
+          enable_day: false
+
+open_webview:
+  fields:
+    device_id: *device_field
+    path:
+      example: /lovelace/settings
+      selector:
+        text:
+
+set_flashlight:
+  fields:
+    device_id: *device_field
+    enabled: *enabled_field
+
+set_bluetooth:
+  fields:
+    device_id: *device_field
+    enabled: *enabled_field
+
+set_ble_transmitter:
+  fields:
+    device_id: *device_field
+    enabled: *enabled_field
+
+configure_ble_transmitter:
+  fields:
+    device_id: *device_field
+    setting:
+      required: true
+      selector:
+        select:
+          translation_key: ble_setting
+          options: [advertise_mode, transmit_power, uuid, major, minor, measured_power]
+    value:
+      required: true
+      example: balanced
+      selector:
+        text:
+
+set_beacon_monitor:
+  fields:
+    device_id: *device_field
+    enabled: *enabled_field
+
+request_location_update:
+  fields:
+    device_id: *device_field
+
+update_sensors:
+  fields:
+    device_id: *device_field
+
+set_high_accuracy_mode:
+  fields:
+    device_id: *device_field
+    mode:
+      required: true
+      selector:
+        select:
+          translation_key: high_accuracy_mode
+          options: [turn_on, turn_off, force_on, force_off]
+
+set_high_accuracy_interval:
+  fields:
+    device_id: *device_field
+    interval:
+      required: true
+      selector:
+        number:
+          min: 5
+          unit_of_measurement: s
+          mode: box
+
+launch_app:
+  fields:
+    device_id: *device_field
+    package_name:
+      required: true
+      example: com.spotify.music
+      selector:
+        text:
+
+launch_activity:
+  fields: &intent_fields
+    device_id: *device_field
+    intent_action:
+      required: true
+      example: android.intent.action.VIEW
+      selector:
+        text:
+    package_name:
+      example: com.google.android.apps.maps
+      selector:
+        text:
+    class_name:
+      selector:
+        text:
+    uri:
+      example: google.navigation:q=Dublin
+      selector:
+        text:
+    mime_type:
+      selector:
+        text:
+    extras:
+      example: alarm_label:work,alarm_enabled:false
+      selector:
+        text:
+
+set_app_lock:
+  fields:
+    device_id: *device_field
+    app_lock_enabled:
+      selector:
+        boolean:
+    app_lock_timeout:
+      selector:
+        number:
+          min: 0
+          unit_of_measurement: s
+          mode: box
+    home_bypass_enabled:
+      selector:
+        boolean:
+
+set_wake_word_detection:
+  fields:
+    device_id: *device_field
+    enabled: *enabled_field
+
+set_persistent_connection:
+  fields:
+    device_id: *device_field
+    mode:
+      required: true
+      selector:
+        select:
+          translation_key: persistent_mode
+          options: [always, home_wifi, screen_on, never]
+
+send_broadcast_intent:
+  fields: *intent_fields
+
+clear_notification:
+  fields:
+    device_id: *device_field
+    tag:
+      required: true
+      selector:
+        text:
+
+remove_notification_channel:
+  fields:
+    device_id: *device_field
+    channel:
+      required: true
+      selector:
+        text:
+
+kiosk_show_screensaver:
+  fields:
+    device_id: *device_field
+
+kiosk_hide_screensaver:
+  fields:
+    device_id: *device_field
+
+kiosk_show_camera:
+  fields:
+    device_id: *device_field
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: camera
+
+kiosk_hide_camera:
+  fields:
+    device_id: *device_field
+
+kiosk_set_brightness:
+  fields:
+    device_id: *device_field
+    level: &kiosk_level
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+          mode: slider
+
+kiosk_set_volume:
+  fields:
+    device_id: *device_field
+    volume: *kiosk_level
+
+kiosk_reload:
+  fields:
+    device_id: *device_field
+
+kiosk_default:
+  fields:
+    device_id: *device_field
+
+send_command:
+  fields:
+    device_id: *device_field
+    command:
+      required: true
+      example: command_future_feature
+      selector:
+        text:
+    data:
+      default: {}
+      example:
+        command: turn_on
+      selector:
+        object:
