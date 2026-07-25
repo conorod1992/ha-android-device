@@ -1,0 +1,34 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN401",
+  "COM812",
+  "D203",
+  "D213",
+  "EM101",
+  "EM102",
+  "FBT001",
+  "F403",
+  "F405",
+  "ISC001",
+  "TC002",
+  "TC003",
+  "TRY003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "ARG", "D", "FBT003", "PLR2004", "S101", "SLF001"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
