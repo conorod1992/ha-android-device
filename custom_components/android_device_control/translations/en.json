@@ -68,4 +68,3 @@
     "send_command": {"name": "Send raw Companion command", "description": "Advanced escape hatch for future or unusual notification commands. Android device safety checks still apply; prefer typed actions.", "fields": {"device_id": {"name": "Device", "description": "One or more Android Companion App devices."}, "command": {"name": "Command message", "description": "Companion message beginning command_, or a documented special command."}, "data": {"name": "Command data", "description": "Nested Companion command payload. This is intentionally not logged."}}}
   }
 }
-

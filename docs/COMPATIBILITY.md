@@ -44,4 +44,3 @@ Inventory reviewed against the official Android command list and Companion App s
 No currently documented Android command is deliberately deferred. `send_command` provides a guarded path for future `command_*` messages until a typed action is released.
 
 The integration deliberately does not wrap ordinary notification features such as posting messages, TTS creation, attachments, or notification actions. Those are notification payload features rather than Android notification commands and remain available directly through Mobile App notify actions.
-
