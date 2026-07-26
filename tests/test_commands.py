@@ -1,15 +1,24 @@
 """Tests for pure Companion command payload builders."""
 
-from datetime import timedelta
+from datetime import time, timedelta
 
 import pytest
 import voluptuous as vol
 
 from custom_components.android_device_control.commands import (
+    COMMON_APPS,
     ble_configuration_payload,
+    dismiss_alarm_payload,
+    dismiss_expired_timers_payload,
     intent_payload,
     raw_payload,
+    resolve_launch_package,
     screen_timeout_payload,
+    set_alarm_payload,
+    set_timer_payload,
+    show_alarms_payload,
+    show_timers_payload,
+    snooze_alarm_payload,
     toggle_payload,
 )
 
@@ -119,3 +128,241 @@ def test_raw_command_guard() -> None:
     }
     with pytest.raises(vol.Invalid, match="Companion commands"):
         raw_payload("ordinary notification", {})
+
+
+@pytest.mark.parametrize(
+    ("alarm_time", "expected"),
+    [
+        (time(0, 0), "HOUR:0,android.intent.extra.alarm.MINUTES:0"),
+        (time(12, 0), "HOUR:12,android.intent.extra.alarm.MINUTES:0"),
+        (time(23, 59), "HOUR:23,android.intent.extra.alarm.MINUTES:59"),
+    ],
+)
+def test_set_alarm_converts_time(alarm_time: time, expected: str) -> None:
+    result = set_alarm_payload(
+        {"alarm_time": alarm_time, "skip_ui": False, "clock_app": "default"}
+    )
+    assert expected in result["data"]["intent_extras"]
+    assert "intent_package_name" not in result["data"]
+
+
+def test_set_alarm_google_clock_regression_payload() -> None:
+    assert set_alarm_payload(
+        {
+            "alarm_time": time(7, 30),
+            "skip_ui": True,
+            "clock_app": "google_clock",
+        }
+    ) == {
+        "message": "command_activity",
+        "data": {
+            "intent_action": "android.intent.action.SET_ALARM",
+            "intent_extras": (
+                "android.intent.extra.alarm.HOUR:7,"
+                "android.intent.extra.alarm.MINUTES:30,"
+                "android.intent.extra.alarm.SKIP_UI:true"
+            ),
+            "intent_package_name": "com.google.android.deskclock",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("repeat", "numbers"),
+    [
+        (
+            ["monday", "tuesday", "wednesday", "thursday", "friday"],
+            "2;3;4;5;6",
+        ),
+        (["saturday", "sunday"], "7;1"),
+        (
+            [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday",
+            ],
+            "2;3;4;5;6;7;1",
+        ),
+    ],
+)
+def test_set_alarm_repeat_days(repeat: list[str], numbers: str) -> None:
+    extras = set_alarm_payload(
+        {
+            "alarm_time": time(7, 30),
+            "repeat": repeat,
+            "skip_ui": False,
+            "clock_app": "default",
+        }
+    )["data"]["intent_extras"]
+    assert f"android.intent.extra.alarm.DAYS:{numbers}:ArrayList<Integer>" in extras
+
+
+def test_set_alarm_optional_properties() -> None:
+    extras = set_alarm_payload(
+        {
+            "alarm_time": time(7, 30),
+            "label": "Wake, now",
+            "vibrate": False,
+            "ringtone": "silent",
+            "skip_ui": False,
+            "clock_app": "custom",
+            "clock_package": "com.example.clock",
+        }
+    )["data"]["intent_extras"]
+    assert "MESSAGE:Wake%2C%20now:String.urlencoded" in extras
+    assert "VIBRATE:false" in extras
+    assert "RINGTONE:silent" in extras
+
+
+def test_set_alarm_custom_ringtone_and_default_omission() -> None:
+    custom = set_alarm_payload(
+        {
+            "alarm_time": time(7),
+            "ringtone": "custom",
+            "ringtone_uri": "content://media/alarm/1",
+            "skip_ui": False,
+        }
+    )
+    assert "content%3A%2F%2Fmedia%2Falarm%2F1" in custom["data"]["intent_extras"]
+    default = set_alarm_payload({"alarm_time": time(7), "skip_ui": False})
+    assert "RINGTONE" not in default["data"]["intent_extras"]
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (
+            {"alarm": "next"},
+            "android.intent.extra.alarm.SEARCH_MODE:android.next",
+        ),
+        (
+            {"alarm": "label", "alarm_label": "Work"},
+            "android.intent.extra.alarm.MESSAGE:Work:String.urlencoded",
+        ),
+        (
+            {"alarm": "time", "alarm_time": time(0, 15)},
+            "android.intent.extra.alarm.HOUR:12,"
+            "android.intent.extra.alarm.MINUTES:15,"
+            "android.intent.extra.alarm.IS_PM:false",
+        ),
+        (
+            {"alarm": "time", "alarm_time": time(12, 15)},
+            "android.intent.extra.alarm.HOUR:12,"
+            "android.intent.extra.alarm.MINUTES:15,"
+            "android.intent.extra.alarm.IS_PM:true",
+        ),
+        (
+            {"alarm": "time", "alarm_time": time(23, 15)},
+            "android.intent.extra.alarm.HOUR:11,"
+            "android.intent.extra.alarm.MINUTES:15,"
+            "android.intent.extra.alarm.IS_PM:true",
+        ),
+    ],
+)
+def test_dismiss_alarm_search_modes(data: dict, expected: str) -> None:
+    extras = dismiss_alarm_payload(data)["data"]["intent_extras"]
+    assert expected in extras
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"alarm": "time"},
+        {"alarm": "label"},
+        {"alarm": "next", "alarm_time": time(8)},
+        {"alarm": "next", "alarm_label": "Work"},
+    ],
+)
+def test_dismiss_alarm_invalid_combinations(data: dict) -> None:
+    with pytest.raises(vol.Invalid):
+        dismiss_alarm_payload(data)
+
+
+def test_snooze_alarm_duration_and_default() -> None:
+    result = snooze_alarm_payload({"duration": timedelta(minutes=15)})
+    assert result["data"]["intent_extras"].endswith("SNOOZE_DURATION:15")
+    assert "intent_extras" not in snooze_alarm_payload({})["data"]
+    with pytest.raises(vol.Invalid, match="whole minutes"):
+        snooze_alarm_payload({"duration": timedelta(seconds=61)})
+
+
+@pytest.mark.parametrize(
+    ("duration", "seconds"),
+    [
+        (timedelta(seconds=1), 1),
+        (timedelta(minutes=10), 600),
+        (timedelta(hours=2), 7200),
+        (timedelta(hours=24), 86400),
+    ],
+)
+def test_set_timer_duration(duration: timedelta, seconds: int) -> None:
+    result = set_timer_payload(
+        {"duration": duration, "skip_ui": True, "clock_app": "google_clock"}
+    )
+    assert (
+        f"android.intent.extra.alarm.LENGTH:{seconds}"
+        in result["data"]["intent_extras"]
+    )
+    assert result["data"]["intent_package_name"] == "com.google.android.deskclock"
+
+
+@pytest.mark.parametrize("duration", [timedelta(), timedelta(seconds=86401)])
+def test_set_timer_rejects_out_of_range(duration: timedelta) -> None:
+    with pytest.raises(vol.Invalid, match="between 1 second and 24 hours"):
+        set_timer_payload({"duration": duration, "skip_ui": False})
+
+
+def test_set_timer_label_and_skip_ui() -> None:
+    extras = set_timer_payload(
+        {
+            "duration": timedelta(minutes=5),
+            "label": "Tea",
+            "skip_ui": False,
+        }
+    )["data"]["intent_extras"]
+    assert "android.intent.extra.alarm.MESSAGE:Tea:String.urlencoded" in extras
+    assert extras.endswith("android.intent.extra.alarm.SKIP_UI:false")
+
+
+def test_show_and_dismiss_timer_actions() -> None:
+    assert show_alarms_payload({})["data"]["intent_action"].endswith("SHOW_ALARMS")
+    assert show_timers_payload({})["data"]["intent_action"].endswith("SHOW_TIMERS")
+    assert dismiss_expired_timers_payload({})["data"]["intent_action"].endswith(
+        "DISMISS_TIMER"
+    )
+
+
+@pytest.mark.parametrize(("package_id", "name"), COMMON_APPS.items())
+def test_each_common_app_is_its_canonical_package(package_id: str, name: str) -> None:
+    assert name
+    assert resolve_launch_package({"app": package_id}) == package_id
+
+
+def test_launch_app_spotify_custom_and_backwards_compatibility() -> None:
+    assert resolve_launch_package({"app": "com.spotify.music"}) == "com.spotify.music"
+    assert (
+        resolve_launch_package(
+            {"app": "custom", "package_name": "com.example.application"}
+        )
+        == "com.example.application"
+    )
+    assert (
+        resolve_launch_package({"package_name": "com.legacy.app"}) == "com.legacy.app"
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"app": "custom"},
+        {"app": "com.spotify.music", "package_name": "com.example"},
+    ],
+)
+def test_launch_app_invalid_combinations(data: dict) -> None:
+    with pytest.raises(vol.Invalid):
+        resolve_launch_package(data)

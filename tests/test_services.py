@@ -165,6 +165,96 @@ async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
             {"message": "command_launch_app", "data": {"package_name": "com.example"}},
         ),
         (
+            "launch_app",
+            {"app": "com.spotify.music"},
+            {
+                "message": "command_launch_app",
+                "data": {"package_name": "com.spotify.music"},
+            },
+        ),
+        (
+            "set_alarm",
+            {
+                "alarm_time": "07:30:00",
+                "skip_ui": True,
+                "clock_app": "google_clock",
+            },
+            {
+                "message": "command_activity",
+                "data": {
+                    "intent_action": "android.intent.action.SET_ALARM",
+                    "intent_extras": (
+                        "android.intent.extra.alarm.HOUR:7,"
+                        "android.intent.extra.alarm.MINUTES:30,"
+                        "android.intent.extra.alarm.SKIP_UI:true"
+                    ),
+                    "intent_package_name": "com.google.android.deskclock",
+                },
+            },
+        ),
+        (
+            "dismiss_alarm",
+            {"alarm": "next"},
+            {
+                "message": "command_activity",
+                "data": {
+                    "intent_action": "android.intent.action.DISMISS_ALARM",
+                    "intent_extras": (
+                        "android.intent.extra.alarm.SEARCH_MODE:android.next"
+                    ),
+                },
+            },
+        ),
+        (
+            "snooze_alarm",
+            {"duration": {"minutes": 10}},
+            {
+                "message": "command_activity",
+                "data": {
+                    "intent_action": "android.intent.action.SNOOZE_ALARM",
+                    "intent_extras": ("android.intent.extra.alarm.SNOOZE_DURATION:10"),
+                },
+            },
+        ),
+        (
+            "show_alarms",
+            {},
+            {
+                "message": "command_activity",
+                "data": {"intent_action": "android.intent.action.SHOW_ALARMS"},
+            },
+        ),
+        (
+            "set_timer",
+            {"duration": {"minutes": 5}},
+            {
+                "message": "command_activity",
+                "data": {
+                    "intent_action": "android.intent.action.SET_TIMER",
+                    "intent_extras": (
+                        "android.intent.extra.alarm.LENGTH:300,"
+                        "android.intent.extra.alarm.SKIP_UI:false"
+                    ),
+                },
+            },
+        ),
+        (
+            "dismiss_expired_timers",
+            {},
+            {
+                "message": "command_activity",
+                "data": {"intent_action": "android.intent.action.DISMISS_TIMER"},
+            },
+        ),
+        (
+            "show_timers",
+            {},
+            {
+                "message": "command_activity",
+                "data": {"intent_action": "android.intent.action.SHOW_TIMERS"},
+            },
+        ),
+        (
             "launch_activity",
             {"intent_action": "android.intent.action.VIEW", "uri": "geo:0,0"},
             {
@@ -263,6 +353,20 @@ def test_numeric_bounds(hass: SimpleNamespace) -> None:
     with pytest.raises(vol.Invalid):
         hass.services.schemas["set_high_accuracy_interval"](
             {"device_id": "phone", "interval": 4}
+        )
+
+
+@pytest.mark.parametrize("package_name", ["", "spotify", "com.example-app", "a..b"])
+def test_launch_app_rejects_invalid_package_ids(
+    hass: SimpleNamespace, package_name: str
+) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["launch_app"](
+            {
+                "device_id": "phone",
+                "app": "custom",
+                "package_name": package_name,
+            }
         )
 
 

@@ -166,11 +166,155 @@ set_high_accuracy_interval:
           unit_of_measurement: s
           mode: box
 
+set_alarm:
+  fields:
+    device_id: *device_field
+    alarm_time:
+      required: true
+      selector:
+        time:
+    label:
+      selector:
+        text:
+    repeat:
+      selector:
+        select:
+          multiple: true
+          translation_key: alarm_weekday
+          options: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
+    vibrate:
+      selector:
+        boolean:
+    ringtone:
+      default: default
+      selector:
+        select:
+          translation_key: alarm_ringtone
+          options: [default, silent, custom]
+    ringtone_uri:
+      example: content://media/external/audio/media/123
+      selector:
+        text:
+    skip_ui:
+      default: false
+      selector:
+        boolean:
+    clock_app: &clock_app_field
+      default: default
+      selector:
+        select:
+          translation_key: clock_app
+          options: [default, google_clock, custom]
+    clock_package: &clock_package_field
+      example: com.example.clock
+      selector:
+        text:
+
+dismiss_alarm:
+  fields:
+    device_id: *device_field
+    alarm:
+      required: true
+      selector:
+        select:
+          translation_key: alarm_search
+          options: [next, time, label]
+    alarm_time:
+      selector:
+        time:
+    alarm_label:
+      selector:
+        text:
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+snooze_alarm:
+  fields:
+    device_id: *device_field
+    duration:
+      selector:
+        duration:
+          enable_day: false
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+show_alarms:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+set_timer:
+  fields:
+    device_id: *device_field
+    duration:
+      required: true
+      selector:
+        duration:
+          enable_day: false
+    label:
+      selector:
+        text:
+    skip_ui:
+      default: false
+      selector:
+        boolean:
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+dismiss_expired_timers:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+show_timers:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
 launch_app:
   fields:
     device_id: *device_field
+    app:
+      selector:
+        select:
+          translation_key: common_app
+          options:
+            - io.homeassistant.companion.android
+            - com.android.chrome
+            - com.google.android.apps.maps
+            - com.google.android.deskclock
+            - com.google.android.gm
+            - com.google.android.calendar
+            - com.google.android.apps.photos
+            - com.google.android.youtube
+            - com.google.android.apps.youtube.music
+            - com.spotify.music
+            - com.netflix.mediaclient
+            - com.plexapp.android
+            - com.whatsapp
+            - com.facebook.katana
+            - com.facebook.orca
+            - com.instagram.android
+            - com.reddit.frontpage
+            - com.discord
+            - org.telegram.messenger
+            - com.microsoft.teams
+            - com.microsoft.office.outlook
+            - com.microsoft.emmx
+            - com.waze
+            - com.amazon.avod.thirdpartyclient
+            - com.disney.disneyplus
+            - org.mozilla.firefox
+            - org.videolan.vlc
+            - com.google.android.apps.docs
+            - com.google.android.keep
+            - com.google.android.apps.messaging
+            - com.google.android.dialer
+            - custom
     package_name:
-      required: true
       example: com.spotify.music
       selector:
         text:
