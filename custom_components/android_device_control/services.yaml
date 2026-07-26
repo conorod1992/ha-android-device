@@ -280,40 +280,39 @@ launch_app:
     app:
       selector:
         select:
-          translation_key: common_app
           options:
-            - io.homeassistant.companion.android
-            - com.android.chrome
-            - com.google.android.apps.maps
-            - com.google.android.deskclock
-            - com.google.android.gm
-            - com.google.android.calendar
-            - com.google.android.apps.photos
-            - com.google.android.youtube
-            - com.google.android.apps.youtube.music
-            - com.spotify.music
-            - com.netflix.mediaclient
-            - com.plexapp.android
-            - com.whatsapp
-            - com.facebook.katana
-            - com.facebook.orca
-            - com.instagram.android
-            - com.reddit.frontpage
-            - com.discord
-            - org.telegram.messenger
-            - com.microsoft.teams
-            - com.microsoft.office.outlook
-            - com.microsoft.emmx
-            - com.waze
-            - com.amazon.avod.thirdpartyclient
-            - com.disney.disneyplus
-            - org.mozilla.firefox
-            - org.videolan.vlc
-            - com.google.android.apps.docs
-            - com.google.android.keep
-            - com.google.android.apps.messaging
-            - com.google.android.dialer
-            - custom
+            - {value: io.homeassistant.companion.android, label: Home Assistant}
+            - {value: com.android.chrome, label: Google Chrome}
+            - {value: com.google.android.apps.maps, label: Google Maps}
+            - {value: com.google.android.deskclock, label: Google Clock}
+            - {value: com.google.android.gm, label: Gmail}
+            - {value: com.google.android.calendar, label: Google Calendar}
+            - {value: com.google.android.apps.photos, label: Google Photos}
+            - {value: com.google.android.youtube, label: YouTube}
+            - {value: com.google.android.apps.youtube.music, label: YouTube Music}
+            - {value: com.spotify.music, label: Spotify}
+            - {value: com.netflix.mediaclient, label: Netflix}
+            - {value: com.plexapp.android, label: Plex}
+            - {value: com.whatsapp, label: WhatsApp}
+            - {value: com.facebook.katana, label: Facebook}
+            - {value: com.facebook.orca, label: Facebook Messenger}
+            - {value: com.instagram.android, label: Instagram}
+            - {value: com.reddit.frontpage, label: Reddit}
+            - {value: com.discord, label: Discord}
+            - {value: org.telegram.messenger, label: Telegram}
+            - {value: com.microsoft.teams, label: Microsoft Teams}
+            - {value: com.microsoft.office.outlook, label: Microsoft Outlook}
+            - {value: com.microsoft.emmx, label: Microsoft Edge}
+            - {value: com.waze, label: Waze}
+            - {value: com.amazon.avod.thirdpartyclient, label: Amazon Prime Video}
+            - {value: com.disney.disneyplus, label: Disney+}
+            - {value: org.mozilla.firefox, label: Firefox}
+            - {value: org.videolan.vlc, label: VLC}
+            - {value: com.google.android.apps.docs, label: Google Drive}
+            - {value: com.google.android.keep, label: Google Keep}
+            - {value: com.google.android.apps.messaging, label: Google Messages}
+            - {value: com.google.android.dialer, label: Google Phone}
+            - {value: custom, label: Custom package}
     package_name:
       example: com.spotify.music
       selector:
