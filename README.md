@@ -68,7 +68,14 @@ It never constructs `notify.mobile_app_*` from a device name. All targets are va
 | `update_sensors` | `command_update_sensors` | — |
 | `set_high_accuracy_mode` | `command_high_accuracy_mode` | on/off/force on/force off |
 | `set_high_accuracy_interval` | `command_high_accuracy_mode` | interval ≥ 5 seconds |
-| `launch_app` | `command_launch_app` | package name |
+| `set_alarm` | `command_activity` | time, repeat days, label, vibration, ringtone, skip UI, optional clock package |
+| `dismiss_alarm` | `command_activity` | next alarm, time, or label search |
+| `snooze_alarm` | `command_activity` | optional whole-minute duration |
+| `show_alarms` | `command_activity` | optional clock package |
+| `set_timer` | `command_activity` | 1 second to 24 hours, label, skip UI, optional clock package |
+| `dismiss_expired_timers` | `command_activity` | dismisses all expired timers |
+| `show_timers` | `command_activity` | optional clock package; Android 8.0+ |
+| `launch_app` | `command_launch_app` | common app preset or custom package ID |
 | `launch_activity` | `command_activity` | action; optional package, class, URI, MIME type, extras |
 | `set_app_lock` | `command_app_lock` | enabled, timeout, home-Wi-Fi bypass |
 | `set_wake_word_detection` | `command_wake_word_detection` | enabled |
@@ -117,6 +124,36 @@ data:
   path: entityId:light.kitchen
 ```
 
+Set a weekday alarm with Android's default clock app:
+
+```yaml
+action: android_device_control.set_alarm
+data:
+  device_id: 12ab34cd56ef
+  alarm_time: "07:30:00"
+  label: Work
+  repeat: [monday, tuesday, wednesday, thursday, friday]
+  skip_ui: true
+```
+
+Launch Spotify from the common-app selector:
+
+```yaml
+action: android_device_control.launch_app
+data:
+  device_id: 12ab34cd56ef
+  app: com.spotify.music
+```
+
+Launch an arbitrary package (the legacy package-only form remains supported):
+
+```yaml
+action: android_device_control.launch_app
+data:
+  device_id: 12ab34cd56ef
+  package_name: com.example.app
+```
+
 Send a typed broadcast intent:
 
 ```yaml
@@ -141,6 +178,90 @@ data:
 
 The escape hatch still requires a verified Android Mobile App target. It accepts messages beginning with `command_` and the documented non-prefixed command messages. Prefer typed actions, which provide selectors and validation.
 
+## Alarms and timers
+
+These actions use Android's public
+[`android.provider.AlarmClock`](https://developer.android.com/reference/android/provider/AlarmClock)
+contract, not private Google Clock actions. By default no package is sent, so Android
+resolves a compatible clock application. Choose Google Clock to target
+`com.google.android.deskclock`, or choose Custom package for another compatible clock.
+An installed clock app must support the relevant standard intent; successful dispatch
+does not guarantee that the receiving app completed it.
+
+`set_alarm` accepts a friendly time selector and translates repeat days to Android
+`Calendar` weekday values. Omitting Vibrate uses Android's documented default of
+enabled. Omitting Ringtone uses the platform default alarm sound; Silent sends the
+standard `silent` value; Custom ringtone accepts a content URI. Skip confirmation UI
+asks the clock app to bypass intermediate UI, but the receiver controls final behavior.
+
+`dismiss_alarm` supports Android's next, time, and label search modes. A 24-hour time
+is translated to Android's 12-hour search value plus an explicit AM/PM flag. If several
+alarms match, the clock app may ask the user to choose. For a repeating alarm,
+dismissal skips/dismisses the upcoming occurrence rather than permanently deleting the
+series. The broad "all alarms" search is deliberately not exposed.
+
+`snooze_alarm` applies only to the currently ringing alarm and is a no-op when none is
+ringing. Its duration is optional; when omitted, the clock app chooses its default.
+`show_alarms` opens the alarm page.
+
+`set_timer` accepts 1 through 86,400 seconds using a duration selector. With Skip
+confirmation UI enabled, Android specifies that the started timer is normally removed
+after it is dismissed. `dismiss_expired_timers` implements Android's useful no-URI
+behavior: it dismisses all expired timers. Arbitrary running timer dismissal is not
+offered because the standard requires a timer-specific deep-link URI and Home Assistant
+has no supported way to obtain one. `show_timers` requires Android 8.0 (API 26) or newer.
+Set/show alarms and set timers require Android 4.4 (API 19) for the full field set;
+dismiss/snooze actions require Android 6.0 (API 23).
+
+## App launcher presets
+
+The App selector stores canonical package IDs rather than integration-specific preset
+keys. Existing automations containing only `package_name` remain valid. Choose Custom
+package and enter Package ID in the editor, or continue using package-only YAML. A
+common preset and `package_name` cannot be supplied together, avoiding ambiguous saved
+automations.
+
+| App | Package ID |
+| --- | --- |
+| Home Assistant | `io.homeassistant.companion.android` |
+| Google Chrome | `com.android.chrome` |
+| Google Maps | `com.google.android.apps.maps` |
+| Google Clock | `com.google.android.deskclock` |
+| Gmail | `com.google.android.gm` |
+| Google Calendar | `com.google.android.calendar` |
+| Google Photos | `com.google.android.apps.photos` |
+| YouTube | `com.google.android.youtube` |
+| YouTube Music | `com.google.android.apps.youtube.music` |
+| Spotify | `com.spotify.music` |
+| Netflix | `com.netflix.mediaclient` |
+| Plex | `com.plexapp.android` |
+| WhatsApp | `com.whatsapp` |
+| Facebook | `com.facebook.katana` |
+| Facebook Messenger | `com.facebook.orca` |
+| Instagram | `com.instagram.android` |
+| Reddit | `com.reddit.frontpage` |
+| Discord | `com.discord` |
+| Telegram | `org.telegram.messenger` |
+| Microsoft Teams | `com.microsoft.teams` |
+| Microsoft Outlook | `com.microsoft.office.outlook` |
+| Microsoft Edge | `com.microsoft.emmx` |
+| Waze | `com.waze` |
+| Amazon Prime Video | `com.amazon.avod.thirdpartyclient` |
+| Disney+ | `com.disney.disneyplus` |
+| Firefox | `org.mozilla.firefox` |
+| VLC | `org.videolan.vlc` |
+| Google Drive | `com.google.android.apps.docs` |
+| Google Keep | `com.google.android.keep` |
+| Google Messages | `com.google.android.apps.messaging` |
+| Google Phone | `com.google.android.dialer` |
+
+The current Companion registration and documented sensors do not expose a complete,
+reliable installed-app inventory. The Last used app and Frontmost app sensors report
+individual observed packages, not all installed applications, so the integration uses
+offline curated presets plus a custom package field. It does not query Google Play at
+runtime. If the selected package is unavailable, the existing Companion App behavior
+is preserved.
+
 ## Permissions and platform caveats
 
 | Commands | Requirement or caveat |
@@ -150,6 +271,7 @@ The escape hatch still requires a verified Android Mobile App target. It accepts
 | Flashlight | Camera permission. |
 | Brightness and screen timeout | Modify system settings permission. Android applies device-specific screen-timeout limits. |
 | Webview, app launch, activity | Display over other apps. Calling activities also need phone permission. |
+| Alarm and timer activities | Display over other apps; a compatible clock app; action support varies by Android API level and OEM clock implementation. |
 | Media | Notification access and an active media session owned by the supplied package. |
 | Wake word | Home Assistant set as default digital assistant plus microphone permission; may use significant battery. |
 | Location and sensors | Appropriate location/sensor permissions and background execution. Location requests are best effort and should not be polled frequently. |
