@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from functools import partial
 from typing import Any
@@ -14,18 +15,29 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from .commands import (
+    ALARM_SEARCH_MODES,
     BLE_SETTINGS,
+    COMMON_APPS,
     DND_MODES,
     HIGH_ACCURACY_MODES,
     MEDIA_COMMANDS,
     PERSISTENT_MODES,
     RINGER_MODES,
     VOLUME_STREAMS,
+    WEEKDAY_NUMBERS,
     ble_configuration_payload,
+    dismiss_alarm_payload,
+    dismiss_expired_timers_payload,
     intent_payload,
     payload,
     raw_payload,
+    resolve_launch_package,
     screen_timeout_payload,
+    set_alarm_payload,
+    set_timer_payload,
+    show_alarms_payload,
+    show_timers_payload,
+    snooze_alarm_payload,
     toggle_payload,
 )
 from .const import *
@@ -34,6 +46,9 @@ from .device import AndroidTarget, resolve_android_targets
 _LOGGER = logging.getLogger(__name__)
 
 PayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
+PACKAGE_ID_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$"
+)
 
 
 def _device_ids(value: Any) -> list[str]:
@@ -56,6 +71,24 @@ def _non_empty(value: Any) -> str:
     if not result:
         raise vol.Invalid("Value must not be empty")
     return result
+
+
+def _package_id(value: Any) -> str:
+    """Validate an Android application package identifier."""
+    result = _non_empty(value)
+    if PACKAGE_ID_PATTERN.fullmatch(result) is None:
+        raise vol.Invalid("Enter a valid Android package ID, such as com.example.app")
+    return result
+
+
+def _clock_fields() -> dict[Any, Any]:
+    """Return the shared optional clock-application fields."""
+    return {
+        vol.Optional("clock_app", default="default"): vol.In(
+            {"default", "google_clock", "custom"}
+        ),
+        vol.Optional("clock_package"): _package_id,
+    }
 
 
 def _app_lock_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -291,10 +324,88 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
     _register(
         hass,
+        SERVICE_SET_ALARM,
+        _schema(
+            {
+                vol.Required("alarm_time"): cv.time,
+                vol.Optional("label"): cv.string,
+                vol.Optional("repeat"): vol.All(
+                    cv.ensure_list, [vol.In(WEEKDAY_NUMBERS)]
+                ),
+                vol.Optional("vibrate"): cv.boolean,
+                vol.Optional("ringtone", default="default"): vol.In(
+                    {"default", "silent", "custom"}
+                ),
+                vol.Optional("ringtone_uri"): cv.string,
+                vol.Optional("skip_ui", default=False): cv.boolean,
+            }
+            | _clock_fields()
+        ),
+        set_alarm_payload,
+    )
+    _register(
+        hass,
+        SERVICE_DISMISS_ALARM,
+        _schema(
+            {
+                vol.Required("alarm"): vol.In(ALARM_SEARCH_MODES),
+                vol.Optional("alarm_time"): cv.time,
+                vol.Optional("alarm_label"): cv.string,
+            }
+            | _clock_fields()
+        ),
+        dismiss_alarm_payload,
+    )
+    _register(
+        hass,
+        SERVICE_SNOOZE_ALARM,
+        _schema(
+            {vol.Optional("duration"): cv.positive_time_period_dict} | _clock_fields()
+        ),
+        snooze_alarm_payload,
+    )
+    _register(
+        hass,
+        SERVICE_SHOW_ALARMS,
+        _schema(_clock_fields()),
+        show_alarms_payload,
+    )
+    _register(
+        hass,
+        SERVICE_SET_TIMER,
+        _schema(
+            {
+                vol.Required("duration"): cv.positive_time_period_dict,
+                vol.Optional("label"): cv.string,
+                vol.Optional("skip_ui", default=False): cv.boolean,
+            }
+            | _clock_fields()
+        ),
+        set_timer_payload,
+    )
+    _register(
+        hass,
+        SERVICE_DISMISS_EXPIRED_TIMERS,
+        _schema(_clock_fields()),
+        dismiss_expired_timers_payload,
+    )
+    _register(
+        hass,
+        SERVICE_SHOW_TIMERS,
+        _schema(_clock_fields()),
+        show_timers_payload,
+    )
+    _register(
+        hass,
         SERVICE_LAUNCH_APP,
-        _schema({vol.Required("package_name"): _non_empty}),
+        _schema(
+            {
+                vol.Optional("app"): vol.In(set(COMMON_APPS) | {"custom"}),
+                vol.Optional("package_name"): _package_id,
+            }
+        ),
         lambda data: payload(
-            "command_launch_app", {"package_name": data["package_name"]}
+            "command_launch_app", {"package_name": resolve_launch_package(data)}
         ),
     )
     intent_fields = {

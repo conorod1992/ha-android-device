@@ -166,11 +166,154 @@ set_high_accuracy_interval:
           unit_of_measurement: s
           mode: box
 
+set_alarm:
+  fields:
+    device_id: *device_field
+    alarm_time:
+      required: true
+      selector:
+        time:
+    label:
+      selector:
+        text:
+    repeat:
+      selector:
+        select:
+          multiple: true
+          translation_key: alarm_weekday
+          options: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
+    vibrate:
+      selector:
+        boolean:
+    ringtone:
+      default: default
+      selector:
+        select:
+          translation_key: alarm_ringtone
+          options: [default, silent, custom]
+    ringtone_uri:
+      example: content://media/external/audio/media/123
+      selector:
+        text:
+    skip_ui:
+      default: false
+      selector:
+        boolean:
+    clock_app: &clock_app_field
+      default: default
+      selector:
+        select:
+          translation_key: clock_app
+          options: [default, google_clock, custom]
+    clock_package: &clock_package_field
+      example: com.example.clock
+      selector:
+        text:
+
+dismiss_alarm:
+  fields:
+    device_id: *device_field
+    alarm:
+      required: true
+      selector:
+        select:
+          translation_key: alarm_search
+          options: [next, time, label]
+    alarm_time:
+      selector:
+        time:
+    alarm_label:
+      selector:
+        text:
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+snooze_alarm:
+  fields:
+    device_id: *device_field
+    duration:
+      selector:
+        duration:
+          enable_day: false
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+show_alarms:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+set_timer:
+  fields:
+    device_id: *device_field
+    duration:
+      required: true
+      selector:
+        duration:
+          enable_day: false
+    label:
+      selector:
+        text:
+    skip_ui:
+      default: false
+      selector:
+        boolean:
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+dismiss_expired_timers:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
+show_timers:
+  fields:
+    device_id: *device_field
+    clock_app: *clock_app_field
+    clock_package: *clock_package_field
+
 launch_app:
   fields:
     device_id: *device_field
+    app:
+      selector:
+        select:
+          options:
+            - {value: io.homeassistant.companion.android, label: Home Assistant}
+            - {value: com.android.chrome, label: Google Chrome}
+            - {value: com.google.android.apps.maps, label: Google Maps}
+            - {value: com.google.android.deskclock, label: Google Clock}
+            - {value: com.google.android.gm, label: Gmail}
+            - {value: com.google.android.calendar, label: Google Calendar}
+            - {value: com.google.android.apps.photos, label: Google Photos}
+            - {value: com.google.android.youtube, label: YouTube}
+            - {value: com.google.android.apps.youtube.music, label: YouTube Music}
+            - {value: com.spotify.music, label: Spotify}
+            - {value: com.netflix.mediaclient, label: Netflix}
+            - {value: com.plexapp.android, label: Plex}
+            - {value: com.whatsapp, label: WhatsApp}
+            - {value: com.facebook.katana, label: Facebook}
+            - {value: com.facebook.orca, label: Facebook Messenger}
+            - {value: com.instagram.android, label: Instagram}
+            - {value: com.reddit.frontpage, label: Reddit}
+            - {value: com.discord, label: Discord}
+            - {value: org.telegram.messenger, label: Telegram}
+            - {value: com.microsoft.teams, label: Microsoft Teams}
+            - {value: com.microsoft.office.outlook, label: Microsoft Outlook}
+            - {value: com.microsoft.emmx, label: Microsoft Edge}
+            - {value: com.waze, label: Waze}
+            - {value: com.amazon.avod.thirdpartyclient, label: Amazon Prime Video}
+            - {value: com.disney.disneyplus, label: Disney+}
+            - {value: org.mozilla.firefox, label: Firefox}
+            - {value: org.videolan.vlc, label: VLC}
+            - {value: com.google.android.apps.docs, label: Google Drive}
+            - {value: com.google.android.keep, label: Google Keep}
+            - {value: com.google.android.apps.messaging, label: Google Messages}
+            - {value: com.google.android.dialer, label: Google Phone}
+            - {value: custom, label: Custom package}
     package_name:
-      required: true
       example: com.spotify.music
       selector:
         text:

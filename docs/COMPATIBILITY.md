@@ -1,11 +1,11 @@
 # Companion command compatibility matrix
 
-Inventory reviewed against the official Android command list and Companion App source on 2026-07-25.
+Inventory reviewed against the official Android command list and Companion App source on 2026-07-26.
 
 | Documented Android command | Status | Friendly action / reason |
 | --- | --- | --- |
 | `clear_notification` | Implemented | `clear_notification` |
-| `command_activity` | Implemented | `launch_activity` |
+| `command_activity` | Implemented | `launch_activity`; standard AlarmClock actions `set_alarm`, `dismiss_alarm`, `snooze_alarm`, `show_alarms`, `set_timer`, `dismiss_expired_timers`, and `show_timers` |
 | `command_app_lock` | Implemented | `set_app_lock` |
 | `command_auto_screen_brightness` | Implemented | `set_auto_brightness` |
 | `command_bluetooth` | Implemented | `set_bluetooth`; Android 12 or older only |
@@ -42,5 +42,10 @@ Inventory reviewed against the official Android command list and Companion App s
 | `update_widgets` | Not applicable | Listed in the cross-platform table but not the Android command table |
 
 No currently documented Android command is deliberately deferred. `send_command` provides a guarded path for future `command_*` messages until a typed action is released.
+
+Android's arbitrary running-timer dismissal is deliberately not wrapped. The standard
+`ACTION_DISMISS_TIMER` contract requires a timer-specific data URI, and neither the
+Mobile App registration nor a documented Companion sensor exposes those URIs. The
+implemented `dismiss_expired_timers` action uses the standard no-URI behavior instead.
 
 The integration deliberately does not wrap ordinary notification features such as posting messages, TTS creation, attachments, or notification actions. Those are notification payload features rather than Android notification commands and remain available directly through Mobile App notify actions.

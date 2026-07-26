@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 import voluptuous as vol
 
@@ -72,6 +73,77 @@ RAW_EXACT_MESSAGES = {
     "kiosk_default",
 }
 
+COMMON_APPS = {
+    "io.homeassistant.companion.android": "Home Assistant",
+    "com.android.chrome": "Google Chrome",
+    "com.google.android.apps.maps": "Google Maps",
+    "com.google.android.deskclock": "Google Clock",
+    "com.google.android.gm": "Gmail",
+    "com.google.android.calendar": "Google Calendar",
+    "com.google.android.apps.photos": "Google Photos",
+    "com.google.android.youtube": "YouTube",
+    "com.google.android.apps.youtube.music": "YouTube Music",
+    "com.spotify.music": "Spotify",
+    "com.netflix.mediaclient": "Netflix",
+    "com.plexapp.android": "Plex",
+    "com.whatsapp": "WhatsApp",
+    "com.facebook.katana": "Facebook",
+    "com.facebook.orca": "Facebook Messenger",
+    "com.instagram.android": "Instagram",
+    "com.reddit.frontpage": "Reddit",
+    "com.discord": "Discord",
+    "org.telegram.messenger": "Telegram",
+    "com.microsoft.teams": "Microsoft Teams",
+    "com.microsoft.office.outlook": "Microsoft Outlook",
+    "com.microsoft.emmx": "Microsoft Edge",
+    "com.waze": "Waze",
+    "com.amazon.avod.thirdpartyclient": "Amazon Prime Video",
+    "com.disney.disneyplus": "Disney+",
+    "org.mozilla.firefox": "Firefox",
+    "org.videolan.vlc": "VLC",
+    "com.google.android.apps.docs": "Google Drive",
+    "com.google.android.keep": "Google Keep",
+    "com.google.android.apps.messaging": "Google Messages",
+    "com.google.android.dialer": "Google Phone",
+}
+
+ALARM_ACTION_SET = "android.intent.action.SET_ALARM"
+ALARM_ACTION_DISMISS = "android.intent.action.DISMISS_ALARM"
+ALARM_ACTION_SNOOZE = "android.intent.action.SNOOZE_ALARM"
+ALARM_ACTION_SHOW = "android.intent.action.SHOW_ALARMS"
+TIMER_ACTION_SET = "android.intent.action.SET_TIMER"
+TIMER_ACTION_DISMISS = "android.intent.action.DISMISS_TIMER"
+TIMER_ACTION_SHOW = "android.intent.action.SHOW_TIMERS"
+
+EXTRA_HOUR = "android.intent.extra.alarm.HOUR"
+EXTRA_MINUTES = "android.intent.extra.alarm.MINUTES"
+EXTRA_DAYS = "android.intent.extra.alarm.DAYS"
+EXTRA_MESSAGE = "android.intent.extra.alarm.MESSAGE"
+EXTRA_VIBRATE = "android.intent.extra.alarm.VIBRATE"
+EXTRA_RINGTONE = "android.intent.extra.alarm.RINGTONE"
+EXTRA_SKIP_UI = "android.intent.extra.alarm.SKIP_UI"
+EXTRA_SEARCH_MODE = "android.intent.extra.alarm.SEARCH_MODE"
+EXTRA_IS_PM = "android.intent.extra.alarm.IS_PM"
+EXTRA_SNOOZE_DURATION = "android.intent.extra.alarm.SNOOZE_DURATION"
+EXTRA_LENGTH = "android.intent.extra.alarm.LENGTH"
+
+WEEKDAY_NUMBERS = {
+    "sunday": 1,
+    "monday": 2,
+    "tuesday": 3,
+    "wednesday": 4,
+    "thursday": 5,
+    "friday": 6,
+    "saturday": 7,
+}
+ALARM_SEARCH_MODES = {
+    "next": "android.next",
+    "time": "android.time",
+    "label": "android.label",
+}
+NOON_HOUR = 12
+MAX_TIMER_SECONDS = 86400
+
 
 def payload(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the outgoing Mobile App notify payload."""
@@ -79,6 +151,148 @@ def payload(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     if data:
         result["data"] = data
     return result
+
+
+def _string_extra(name: str, value: str) -> str:
+    """Encode an arbitrary string for Companion's comma-separated extra format."""
+    return f"{name}:{quote(value, safe='')}:String.urlencoded"
+
+
+def _activity_payload(
+    action: str,
+    extras: list[str] | None = None,
+    package_name: str | None = None,
+) -> dict[str, Any]:
+    """Build a standard AlarmClock activity command."""
+    data = {"intent_action": action}
+    if extras:
+        data["intent_extras"] = ",".join(extras)
+    if package_name:
+        data["intent_package_name"] = package_name
+    return payload("command_activity", data)
+
+
+def resolve_launch_package(data: dict[str, Any]) -> str:
+    """Resolve an app preset or a backwards-compatible raw package name."""
+    app = data.get("app")
+    package_name = data.get("package_name", "").strip()
+    if app == "custom":
+        if not package_name:
+            raise vol.Invalid("Package ID is required for Custom package")
+        return package_name
+    if app:
+        if package_name:
+            raise vol.Invalid("Do not set Package ID when a common app is selected")
+        return app
+    if package_name:
+        return package_name
+    raise vol.Invalid("Select a common app or provide a Package ID")
+
+
+def clock_package(data: dict[str, Any]) -> str | None:
+    """Resolve optional AlarmClock package targeting."""
+    selection = data.get("clock_app", "default")
+    custom = data.get("clock_package", "").strip()
+    if selection == "custom":
+        if not custom:
+            raise vol.Invalid("Clock package is required for Custom package")
+        return custom
+    if custom:
+        raise vol.Invalid("Clock package is only used with Custom package")
+    if selection == "google_clock":
+        return "com.google.android.deskclock"
+    return None
+
+
+def set_alarm_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an Android AlarmClock set-alarm intent."""
+    alarm_time = data["alarm_time"]
+    extras = [f"{EXTRA_HOUR}:{alarm_time.hour}", f"{EXTRA_MINUTES}:{alarm_time.minute}"]
+    if label := data.get("label", "").strip():
+        extras.append(_string_extra(EXTRA_MESSAGE, label))
+    if days := data.get("repeat"):
+        values = ";".join(str(WEEKDAY_NUMBERS[day]) for day in days)
+        extras.append(f"{EXTRA_DAYS}:{values}:ArrayList<Integer>")
+    if "vibrate" in data:
+        extras.append(f"{EXTRA_VIBRATE}:{str(data['vibrate']).lower()}")
+    ringtone = data.get("ringtone", "default")
+    if ringtone == "silent":
+        extras.append(f"{EXTRA_RINGTONE}:silent")
+    elif ringtone == "custom":
+        uri = data.get("ringtone_uri", "").strip()
+        if not uri:
+            raise vol.Invalid("Ringtone URI is required for Custom ringtone")
+        extras.append(_string_extra(EXTRA_RINGTONE, uri))
+    elif data.get("ringtone_uri", "").strip():
+        raise vol.Invalid("Ringtone URI is only used with Custom ringtone")
+    extras.append(f"{EXTRA_SKIP_UI}:{str(data['skip_ui']).lower()}")
+    return _activity_payload(ALARM_ACTION_SET, extras, clock_package(data))
+
+
+def dismiss_alarm_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build a standard alarm search and dismiss intent."""
+    mode = data["alarm"]
+    extras = [f"{EXTRA_SEARCH_MODE}:{ALARM_SEARCH_MODES[mode]}"]
+    alarm_time = data.get("alarm_time")
+    label = data.get("alarm_label", "").strip()
+    if mode == "time":
+        if alarm_time is None:
+            raise vol.Invalid("Alarm time is required when dismissing by time")
+        hour_12 = alarm_time.hour % 12 or 12
+        extras.extend(
+            [
+                f"{EXTRA_HOUR}:{hour_12}",
+                f"{EXTRA_MINUTES}:{alarm_time.minute}",
+                f"{EXTRA_IS_PM}:{str(alarm_time.hour >= NOON_HOUR).lower()}",
+            ]
+        )
+    elif alarm_time is not None:
+        raise vol.Invalid("Alarm time is only used with Alarm at time")
+    if mode == "label":
+        if not label:
+            raise vol.Invalid("Alarm label is required when dismissing by label")
+        extras.append(_string_extra(EXTRA_MESSAGE, label))
+    elif label:
+        raise vol.Invalid("Alarm label is only used with Alarm with label")
+    return _activity_payload(ALARM_ACTION_DISMISS, extras, clock_package(data))
+
+
+def snooze_alarm_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build a standard snooze-currently-ringing-alarm intent."""
+    extras = []
+    if duration := data.get("duration"):
+        seconds = duration.total_seconds()
+        if seconds % 60:
+            raise vol.Invalid("Snooze duration must use whole minutes")
+        extras.append(f"{EXTRA_SNOOZE_DURATION}:{int(seconds // 60)}")
+    return _activity_payload(ALARM_ACTION_SNOOZE, extras, clock_package(data))
+
+
+def set_timer_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an Android AlarmClock set-timer intent."""
+    seconds = int(data["duration"].total_seconds())
+    if not 1 <= seconds <= MAX_TIMER_SECONDS:
+        raise vol.Invalid("Timer duration must be between 1 second and 24 hours")
+    extras = [f"{EXTRA_LENGTH}:{seconds}"]
+    if label := data.get("label", "").strip():
+        extras.append(_string_extra(EXTRA_MESSAGE, label))
+    extras.append(f"{EXTRA_SKIP_UI}:{str(data['skip_ui']).lower()}")
+    return _activity_payload(TIMER_ACTION_SET, extras, clock_package(data))
+
+
+def show_alarms_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build a standard show-alarms intent."""
+    return _activity_payload(ALARM_ACTION_SHOW, package_name=clock_package(data))
+
+
+def dismiss_expired_timers_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Dismiss every expired timer, as defined by Android's no-URI behavior."""
+    return _activity_payload(TIMER_ACTION_DISMISS, package_name=clock_package(data))
+
+
+def show_timers_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build a standard show-timers intent."""
+    return _activity_payload(TIMER_ACTION_SHOW, package_name=clock_package(data))
 
 
 def toggle_payload(message: str, enabled: bool) -> dict[str, Any]:
