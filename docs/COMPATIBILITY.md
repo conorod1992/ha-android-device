@@ -1,6 +1,8 @@
 # Companion command compatibility matrix
 
-Inventory reviewed against the official Android command list and Companion App source on 2026-07-26.
+Inventory reviewed against the official Android command list and Companion App source on 2026-07-27.
+
+## Companion notification-command wrappers
 
 | Documented Android command | Status | Friendly action / reason |
 | --- | --- | --- |
@@ -43,9 +45,50 @@ Inventory reviewed against the official Android command list and Companion App s
 
 No currently documented Android command is deliberately deferred. `send_command` provides a guarded path for future `command_*` messages until a typed action is released.
 
+## Friendly standard Android intents
+
+These actions use `command_activity` as transport but expose public Android or provider
+contracts instead of raw fields.
+
+| Friendly action | Contract | Compatibility notes |
+| --- | --- | --- |
+| `open_url` | `ACTION_VIEW` | Any absolute URI Android can resolve |
+| `show_map` | `geo:` / Waze URL | Generic Android, optional Google Maps targeting, Waze web fallback |
+| `navigate_to` | `geo:` / Google Maps URLs / Waze Deep Links | Generic handling cannot guarantee turn-by-turn; provider modes are validated |
+| `dial_number` | `ACTION_DIAL` | UI only; no direct-call action or CALL_PHONE requirement |
+| `compose_sms` | `ACTION_SENDTO` + `smsto:` | Composition UI only |
+| `compose_email` | `ACTION_SENDTO` + `mailto:` | Email-capable handlers; composition UI only |
+| `create_calendar_event` | `ACTION_INSERT` + Calendar URI/extras | Opens editor; naive datetimes use Home Assistant's timezone |
+| `web_search` | `ACTION_WEB_SEARCH` | Generic Android handler; no Google hardcoding |
+| `open_settings` | curated `Settings` constants | API levels are recorded in code; OEM resolution can differ |
+| `open_app_settings` | details, notifications, overlay, write settings | Permissions are reached through Application details |
+| `open_camera` / `open_video_camera` | standard media capture actions | No activity result, remote capture, or retrieval |
+| `open_entity` | Companion `entityId:` webview | Reuses `command_webview` |
+| `find_phone` | screen command + TTS `alarm_stream_max` | Optional flashlight is not auto-restored |
+
+The settings list deliberately omits candidates without a stable public contract,
+including a package-scoped permissions deep link and Android Auto. App-specific battery
+optimisation exemption requests are also omitted because they carry policy and
+permission requirements inappropriate for a generic remote action.
+
+## Structured intent extras
+
+`launch_activity` and `send_broadcast_intent` accept either the legacy raw string or a
+typed `structured_extras` list. The exposed, safely coercible subset of the Companion
+parser is: strings, booleans, integers, longs, floats, doubles, and integer lists.
+Strings use `String.urlencoded`; integer lists use Companion's semicolon format.
+Raw input remains untouched for backwards compatibility.
+
+The current Companion source has a defect in its URL-decoded string-array branches:
+each element decodes the full joined value. Structured string arrays are deliberately
+omitted rather than serialized unreliably. Advanced users can retain raw extras for
+receiver-specific cases.
+
 Android's arbitrary running-timer dismissal is deliberately not wrapped. The standard
 `ACTION_DISMISS_TIMER` contract requires a timer-specific data URI, and neither the
 Mobile App registration nor a documented Companion sensor exposes those URIs. The
 implemented `dismiss_expired_timers` action uses the standard no-URI behavior instead.
 
-The integration deliberately does not wrap ordinary notification features such as posting messages, TTS creation, attachments, or notification actions. Those are notification payload features rather than Android notification commands and remain available directly through Mobile App notify actions.
+Ordinary notifications remain outside the integration except for `find_phone`, whose
+documented TTS behavior is essential to that operation and whose `alarm_stream_max`
+implementation restores the prior stream volume inside Companion.

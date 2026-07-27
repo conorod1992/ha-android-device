@@ -111,6 +111,14 @@ async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
             {"message": "command_webview", "data": {"command": "entityId:sun.sun"}},
         ),
         (
+            "open_entity",
+            {"entity_id": "light.kitchen"},
+            {
+                "message": "command_webview",
+                "data": {"command": "entityId:light.kitchen"},
+            },
+        ),
+        (
             "set_flashlight",
             {"enabled": False},
             {"message": "command_flashlight", "data": {"command": "turn_off"}},
@@ -389,3 +397,45 @@ async def test_all_targets_are_resolved_before_dispatch(
             ServiceCall(hass, DOMAIN, "stop_tts", {"device_id": ["phone", "bad"]})
         )
     assert hass.services.calls == []
+
+
+async def test_find_phone_command_order_and_defaults(hass: SimpleNamespace) -> None:
+    validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_screen_on",
+        "TTS",
+    ]
+    assert hass.services.calls[-1][2]["data"] == {
+        "tts_text": "Here I am",
+        "media_stream": "alarm_stream_max",
+    }
+
+
+async def test_find_phone_optional_flashlight_is_ordered(hass: SimpleNamespace) -> None:
+    validated = hass.services.schemas["find_phone"](
+        {
+            "device_id": "phone",
+            "wake_screen": False,
+            "flashlight": True,
+            "message": "Find me",
+        }
+    )
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_flashlight",
+        "TTS",
+    ]
+
+
+async def test_find_phone_reports_transport_failure(hass: SimpleNamespace) -> None:
+    hass.services.failure = HomeAssistantError("transport failed")
+    validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
+    with pytest.raises(HomeAssistantError):
+        await hass.services.handlers["find_phone"](
+            ServiceCall(hass, DOMAIN, "find_phone", validated)
+        )
