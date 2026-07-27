@@ -8,6 +8,12 @@ from urllib.parse import quote
 
 import voluptuous as vol
 
+from .apps import COMMON_APPS as _COMMON_APPS
+from .apps import resolve_app
+from .intents import merge_extras
+
+COMMON_APPS = _COMMON_APPS
+
 TOGGLE_COMMANDS = {False: "turn_off", True: "turn_on"}
 RINGER_MODES = {"normal", "vibrate", "silent"}
 DND_MODES = {"off", "priority_only", "alarms_only", "total_silence"}
@@ -71,40 +77,6 @@ RAW_EXACT_MESSAGES = {
     "kiosk_set_volume",
     "kiosk_reload",
     "kiosk_default",
-}
-
-COMMON_APPS = {
-    "io.homeassistant.companion.android": "Home Assistant",
-    "com.android.chrome": "Google Chrome",
-    "com.google.android.apps.maps": "Google Maps",
-    "com.google.android.deskclock": "Google Clock",
-    "com.google.android.gm": "Gmail",
-    "com.google.android.calendar": "Google Calendar",
-    "com.google.android.apps.photos": "Google Photos",
-    "com.google.android.youtube": "YouTube",
-    "com.google.android.apps.youtube.music": "YouTube Music",
-    "com.spotify.music": "Spotify",
-    "com.netflix.mediaclient": "Netflix",
-    "com.plexapp.android": "Plex",
-    "com.whatsapp": "WhatsApp",
-    "com.facebook.katana": "Facebook",
-    "com.facebook.orca": "Facebook Messenger",
-    "com.instagram.android": "Instagram",
-    "com.reddit.frontpage": "Reddit",
-    "com.discord": "Discord",
-    "org.telegram.messenger": "Telegram",
-    "com.microsoft.teams": "Microsoft Teams",
-    "com.microsoft.office.outlook": "Microsoft Outlook",
-    "com.microsoft.emmx": "Microsoft Edge",
-    "com.waze": "Waze",
-    "com.amazon.avod.thirdpartyclient": "Amazon Prime Video",
-    "com.disney.disneyplus": "Disney+",
-    "org.mozilla.firefox": "Firefox",
-    "org.videolan.vlc": "VLC",
-    "com.google.android.apps.docs": "Google Drive",
-    "com.google.android.keep": "Google Keep",
-    "com.google.android.apps.messaging": "Google Messages",
-    "com.google.android.dialer": "Google Phone",
 }
 
 ALARM_ACTION_SET = "android.intent.action.SET_ALARM"
@@ -174,19 +146,7 @@ def _activity_payload(
 
 def resolve_launch_package(data: dict[str, Any]) -> str:
     """Resolve an app preset or a backwards-compatible raw package name."""
-    app = data.get("app")
-    package_name = data.get("package_name", "").strip()
-    if app == "custom":
-        if not package_name:
-            raise vol.Invalid("Package ID is required for Custom package")
-        return package_name
-    if app:
-        if package_name:
-            raise vol.Invalid("Do not set Package ID when a common app is selected")
-        return app
-    if package_name:
-        return package_name
-    raise vol.Invalid("Select a common app or provide a Package ID")
+    return resolve_app(data)
 
 
 def clock_package(data: dict[str, Any]) -> str | None:
@@ -313,7 +273,7 @@ def intent_payload(message: str, data: dict[str, Any]) -> dict[str, Any]:
     action = data["intent_action"].strip()
     package = data.get("package_name", "").strip()
     class_name = data.get("class_name", "").strip()
-    extras = data.get("extras", "").strip()
+    extras = merge_extras(data.get("extras", ""), data.get("structured_extras", []))
     if not action:
         raise vol.Invalid("Intent action must not be empty")
     if message == "command_broadcast_intent" and not package:

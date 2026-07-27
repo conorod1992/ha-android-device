@@ -118,6 +118,37 @@ def test_intent_rejects_malformed_extras() -> None:
         )
 
 
+def test_intent_accepts_structured_extras_and_preserves_raw_compatibility() -> None:
+    structured = intent_payload(
+        "command_activity",
+        {
+            "intent_action": "example.ACTION",
+            "structured_extras": [
+                {"name": "text", "type": "string", "value": "Hello, café"}
+            ],
+        },
+    )
+    assert structured["data"]["intent_extras"] == (
+        "text:Hello%2C%20caf%C3%A9:String.urlencoded"
+    )
+    raw = intent_payload(
+        "command_activity",
+        {"intent_action": "example.ACTION", "extras": "legacy:value:String"},
+    )
+    assert raw["data"]["intent_extras"] == "legacy:value:String"
+    with pytest.raises(vol.Invalid, match="either raw extras"):
+        intent_payload(
+            "command_activity",
+            {
+                "intent_action": "example.ACTION",
+                "extras": "legacy:value",
+                "structured_extras": [
+                    {"name": "text", "type": "string", "value": "new"}
+                ],
+            },
+        )
+
+
 def test_raw_command_guard() -> None:
     assert raw_payload("command_new_feature", {"command": "turn_on"}) == {
         "message": "command_new_feature",

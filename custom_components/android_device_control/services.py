@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
+from .apps import packages_for, resolve_app
 from .commands import (
     ALARM_SEARCH_MODES,
     BLE_SETTINGS,
@@ -42,6 +43,21 @@ from .commands import (
 )
 from .const import *
 from .device import AndroidTarget, resolve_android_targets
+from .intents import (
+    APP_SETTINGS,
+    SETTINGS,
+    app_settings_payload,
+    calendar_payload,
+    camera_payload,
+    dial_payload,
+    email_payload,
+    navigate_payload,
+    open_url_payload,
+    settings_payload,
+    show_map_payload,
+    sms_payload,
+    web_search_payload,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,6 +141,16 @@ def _broadcast_builder(data: dict[str, Any]) -> dict[str, Any]:
     return intent_payload("command_broadcast_intent", data)
 
 
+def _media_builder(data: dict[str, Any]) -> dict[str, Any]:
+    return payload(
+        "command_media",
+        {
+            "media_command": data["media_command"],
+            "media_package_name": resolve_app(data, capability="media"),
+        },
+    )
+
+
 async def _async_send(
     hass: HomeAssistant, target: AndroidTarget, notify_payload: dict[str, Any]
 ) -> None:
@@ -169,6 +195,36 @@ async def _async_handle(
             notify_payload["message"],
             ", ".join(failures),
         )
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={"devices": ", ".join(failures)},
+        )
+
+
+async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Send conspicuous, ordered commands without guessing state to restore."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    commands = []
+    if data["wake_screen"]:
+        commands.append(payload("command_screen_on", {"command": "reset"}))
+    if data["flashlight"]:
+        commands.append(payload("command_flashlight", {"command": "turn_on"}))
+    commands.append(
+        payload(
+            "TTS",
+            {"tts_text": data["message"], "media_stream": "alarm_stream_max"},
+        )
+    )
+    failures = []
+    for target in targets:
+        try:
+            for command in commands:
+                await _async_send(hass, target, command)
+        except HomeAssistantError:
+            failures.append(target.device_name)
+    if failures:
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
@@ -227,16 +283,11 @@ def async_register_services(hass: HomeAssistant) -> None:
         _schema(
             {
                 vol.Required("media_command"): vol.In(MEDIA_COMMANDS),
-                vol.Required("package_name"): _non_empty,
+                vol.Optional("app"): vol.In(packages_for("media") | {"custom"}),
+                vol.Optional("package_name"): _package_id,
             }
         ),
-        lambda data: payload(
-            "command_media",
-            {
-                "media_command": data["media_command"],
-                "media_package_name": data["package_name"],
-            },
-        ),
+        _media_builder,
     )
     simple_messages = {
         SERVICE_STOP_TTS: "command_stop_tts",
@@ -415,6 +466,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         vol.Optional("uri"): cv.string,
         vol.Optional("mime_type"): cv.string,
         vol.Optional("extras"): cv.string,
+        vol.Optional("structured_extras", default=[]): [dict],
     }
     _register(hass, SERVICE_LAUNCH_ACTIVITY, _schema(intent_fields), _activity_builder)
     _register(
@@ -489,6 +541,140 @@ def async_register_services(hass: HomeAssistant) -> None:
             }
         ),
         lambda data: raw_payload(data["command"], data["data"]),
+    )
+
+    _register(
+        hass,
+        SERVICE_OPEN_URL,
+        _schema(
+            {
+                vol.Required("url"): _non_empty,
+                vol.Optional("app"): vol.In(packages_for("browser") | {"custom"}),
+                vol.Optional("package_name"): _package_id,
+            }
+        ),
+        open_url_payload,
+    )
+    location_fields = {
+        vol.Optional("location"): cv.string,
+        vol.Optional("latitude"): vol.Coerce(float),
+        vol.Optional("longitude"): vol.Coerce(float),
+        vol.Optional("label"): cv.string,
+        vol.Optional("provider", default="default"): vol.In(
+            {"default", "google_maps", "waze"}
+        ),
+    }
+    _register(hass, SERVICE_SHOW_MAP, _schema(location_fields), show_map_payload)
+    _register(
+        hass,
+        SERVICE_NAVIGATE_TO,
+        _schema(
+            location_fields
+            | {
+                vol.Optional("travel_mode", default="default"): vol.In(
+                    {"default", "driving", "walking", "bicycling", "transit"}
+                )
+            }
+        ),
+        navigate_payload,
+    )
+    _register(
+        hass,
+        SERVICE_DIAL_NUMBER,
+        _schema({vol.Required("phone_number"): _non_empty}),
+        dial_payload,
+    )
+    _register(
+        hass,
+        SERVICE_COMPOSE_SMS,
+        _schema(
+            {
+                vol.Optional("recipient", default=""): cv.string,
+                vol.Optional("message", default=""): cv.string,
+            }
+        ),
+        sms_payload,
+    )
+    _register(
+        hass,
+        SERVICE_COMPOSE_EMAIL,
+        _schema(
+            {
+                vol.Optional("to", default=[]): vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional("cc", default=[]): vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional("bcc", default=[]): vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional("subject", default=""): cv.string,
+                vol.Optional("body", default=""): cv.string,
+            }
+        ),
+        email_payload,
+    )
+    _register(
+        hass,
+        SERVICE_CREATE_CALENDAR_EVENT,
+        _schema(
+            {
+                vol.Required("title"): _non_empty,
+                vol.Required("start"): cv.datetime,
+                vol.Required("end"): cv.datetime,
+                vol.Optional("all_day", default=False): cv.boolean,
+                vol.Optional("location"): cv.string,
+                vol.Optional("description"): cv.string,
+                vol.Optional("attendees"): vol.All(cv.ensure_list, [cv.string]),
+            }
+        ),
+        calendar_payload,
+    )
+    _register(
+        hass,
+        SERVICE_WEB_SEARCH,
+        _schema({vol.Required("query"): _non_empty}),
+        web_search_payload,
+    )
+    _register(
+        hass,
+        SERVICE_OPEN_SETTINGS,
+        _schema({vol.Required("page"): vol.In(SETTINGS)}),
+        settings_payload,
+    )
+    _register(
+        hass,
+        SERVICE_OPEN_APP_SETTINGS,
+        _schema(
+            {
+                vol.Required("page"): vol.In(APP_SETTINGS),
+                vol.Optional("app"): vol.In(set(COMMON_APPS) | {"custom"}),
+                vol.Optional("package_name"): _package_id,
+            }
+        ),
+        app_settings_payload,
+    )
+    _register(hass, SERVICE_OPEN_CAMERA, _schema(), lambda _data: camera_payload())
+    _register(
+        hass,
+        SERVICE_OPEN_VIDEO_CAMERA,
+        _schema(),
+        lambda _data: camera_payload(video=True),
+    )
+    _register(
+        hass,
+        SERVICE_OPEN_ENTITY,
+        _schema({vol.Required("entity_id"): cv.entity_id}),
+        lambda data: payload(
+            "command_webview", {"command": f"entityId:{data['entity_id']}"}
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FIND_PHONE,
+        partial(_async_find_phone, hass),
+        schema=_schema(
+            {
+                vol.Optional("wake_screen", default=True): cv.boolean,
+                vol.Optional("flashlight", default=False): cv.boolean,
+                vol.Optional("message", default="Here I am"): _non_empty,
+            }
+        ),
     )
 
 

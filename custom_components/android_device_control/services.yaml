@@ -48,8 +48,20 @@ media_control:
         select:
           translation_key: media_command
           options: [play, pause, play_pause, stop, next, previous, fast_forward, rewind]
+    app:
+      selector:
+        select:
+          options:
+            - {value: com.google.android.youtube, label: YouTube}
+            - {value: com.google.android.apps.youtube.music, label: YouTube Music}
+            - {value: com.spotify.music, label: Spotify}
+            - {value: com.netflix.mediaclient, label: Netflix}
+            - {value: com.plexapp.android, label: Plex}
+            - {value: com.amazon.avod.thirdpartyclient, label: Amazon Prime Video}
+            - {value: com.disney.disneyplus, label: Disney+}
+            - {value: org.videolan.vlc, label: VLC}
+            - {value: custom, label: Custom package}
     package_name:
-      required: true
       example: com.spotify.music
       selector:
         text:
@@ -344,6 +356,11 @@ launch_activity:
       example: alarm_label:work,alarm_enabled:false
       selector:
         text:
+    structured_extras:
+      example:
+        - {name: android.intent.extra.TEXT, type: string, value: Hello world}
+      selector:
+        object:
 
 set_app_lock:
   fields:
@@ -455,3 +472,260 @@ send_command:
         command: turn_on
       selector:
         object:
+
+open_url:
+  fields:
+    device_id: *device_field
+    url:
+      required: true
+      example: https://www.home-assistant.io/
+      selector:
+        text:
+    app:
+      selector:
+        select:
+          options:
+            - {value: com.android.chrome, label: Google Chrome}
+            - {value: com.microsoft.emmx, label: Microsoft Edge}
+            - {value: org.mozilla.firefox, label: Firefox}
+            - {value: custom, label: Custom package}
+    package_name:
+      example: com.example.browser
+      selector:
+        text:
+
+show_map: &location_action
+  fields:
+    device_id: *device_field
+    location:
+      example: Dublin Airport
+      selector:
+        text:
+    latitude:
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    longitude:
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+    label:
+      selector:
+        text:
+    provider:
+      default: default
+      selector:
+        select:
+          translation_key: navigation_provider
+          options: [default, google_maps, waze]
+
+navigate_to:
+  fields:
+    device_id: *device_field
+    location:
+      example: Dublin Airport
+      selector:
+        text:
+    latitude:
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    longitude:
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+    label:
+      selector:
+        text:
+    provider:
+      default: default
+      selector:
+        select:
+          translation_key: navigation_provider
+          options: [default, google_maps, waze]
+    travel_mode:
+      default: default
+      selector:
+        select:
+          translation_key: travel_mode
+          options: [default, driving, walking, bicycling, transit]
+
+dial_number:
+  fields:
+    device_id: *device_field
+    phone_number:
+      required: true
+      example: +353 1 234 5678
+      selector:
+        text:
+
+compose_sms:
+  fields:
+    device_id: *device_field
+    recipient:
+      example: +353 1 234 5678
+      selector:
+        text:
+    message:
+      selector:
+        text:
+          multiline: true
+
+compose_email:
+  fields:
+    device_id: *device_field
+    to: &email_list
+      selector:
+        text:
+          multiple: true
+    cc: *email_list
+    bcc: *email_list
+    subject:
+      selector:
+        text:
+    body:
+      selector:
+        text:
+          multiline: true
+
+create_calendar_event:
+  fields:
+    device_id: *device_field
+    title:
+      required: true
+      selector:
+        text:
+    start:
+      required: true
+      selector:
+        datetime:
+    end:
+      required: true
+      selector:
+        datetime:
+    all_day:
+      default: false
+      selector:
+        boolean:
+    location:
+      selector:
+        text:
+    description:
+      selector:
+        text:
+          multiline: true
+    attendees:
+      selector:
+        text:
+          multiple: true
+
+web_search:
+  fields:
+    device_id: *device_field
+    query:
+      required: true
+      selector:
+        text:
+
+open_settings:
+  fields:
+    device_id: *device_field
+    page:
+      required: true
+      selector:
+        select:
+          translation_key: settings_page
+          options: [main, wifi, bluetooth, nfc, display, sound, location, battery, apps, default_apps, accessibility, notification_settings, notification_access, dnd_access, overlay_access, modify_system_settings, developer_options, cast, home, night_display, security, privacy, vpn, data_usage]
+
+open_app_settings:
+  fields:
+    device_id: *device_field
+    page:
+      required: true
+      selector:
+        select:
+          translation_key: app_settings_page
+          options: [details, notifications, overlay, modify_system_settings]
+    app:
+      selector:
+        select:
+          options:
+            - {value: io.homeassistant.companion.android, label: Home Assistant}
+            - {value: com.android.chrome, label: Google Chrome}
+            - {value: com.google.android.apps.maps, label: Google Maps}
+            - {value: com.google.android.deskclock, label: Google Clock}
+            - {value: com.google.android.gm, label: Gmail}
+            - {value: com.google.android.calendar, label: Google Calendar}
+            - {value: com.google.android.apps.photos, label: Google Photos}
+            - {value: com.google.android.youtube, label: YouTube}
+            - {value: com.google.android.apps.youtube.music, label: YouTube Music}
+            - {value: com.spotify.music, label: Spotify}
+            - {value: com.netflix.mediaclient, label: Netflix}
+            - {value: com.plexapp.android, label: Plex}
+            - {value: com.whatsapp, label: WhatsApp}
+            - {value: com.facebook.katana, label: Facebook}
+            - {value: com.facebook.orca, label: Facebook Messenger}
+            - {value: com.instagram.android, label: Instagram}
+            - {value: com.reddit.frontpage, label: Reddit}
+            - {value: com.discord, label: Discord}
+            - {value: org.telegram.messenger, label: Telegram}
+            - {value: com.microsoft.teams, label: Microsoft Teams}
+            - {value: com.microsoft.office.outlook, label: Microsoft Outlook}
+            - {value: com.microsoft.emmx, label: Microsoft Edge}
+            - {value: com.waze, label: Waze}
+            - {value: com.amazon.avod.thirdpartyclient, label: Amazon Prime Video}
+            - {value: com.disney.disneyplus, label: Disney+}
+            - {value: org.mozilla.firefox, label: Firefox}
+            - {value: org.videolan.vlc, label: VLC}
+            - {value: com.google.android.apps.docs, label: Google Drive}
+            - {value: com.google.android.keep, label: Google Keep}
+            - {value: com.google.android.apps.messaging, label: Google Messages}
+            - {value: com.google.android.dialer, label: Google Phone}
+            - {value: custom, label: Custom package}
+    package_name:
+      selector:
+        text:
+
+open_camera:
+  fields:
+    device_id: *device_field
+
+open_video_camera:
+  fields:
+    device_id: *device_field
+
+open_entity:
+  fields:
+    device_id: *device_field
+    entity_id:
+      required: true
+      selector:
+        entity:
+
+find_phone:
+  fields:
+    device_id: *device_field
+    wake_screen:
+      default: true
+      selector:
+        boolean:
+    flashlight:
+      default: false
+      selector:
+        boolean:
+    message:
+      default: Here I am
+      selector:
+        text:
