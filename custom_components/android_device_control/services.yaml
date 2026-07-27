@@ -725,7 +725,13 @@ find_phone:
       default: false
       selector:
         boolean:
+    sound_mode:
+      default: ringtone
+      selector:
+        select:
+          translation_key: find_phone_sound
+          options: [ringtone, tts]
     message:
-      default: Here I am
+      default: Finding phone
       selector:
         text:

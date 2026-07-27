@@ -64,7 +64,7 @@ contracts instead of raw fields.
 | `open_app_settings` | details, notifications, overlay, write settings | Permissions are reached through Application details |
 | `open_camera` / `open_video_camera` | standard media capture actions | No activity result, remote capture, or retrieval |
 | `open_entity` | Companion `entityId:` webview | Reuses `command_webview` |
-| `find_phone` | screen command + TTS `alarm_stream_max` | Optional flashlight is not auto-restored |
+| `find_phone` | one screen wake + alarm-channel notification or TTS | Ringtone uses current alarm volume; TTS temporarily maximises and restores it |
 
 The settings list deliberately omits candidates without a stable public contract,
 including a package-scoped permissions deep link and Android Auto. App-specific battery
@@ -89,6 +89,14 @@ Android's arbitrary running-timer dismissal is deliberately not wrapped. The sta
 Mobile App registration nor a documented Companion sensor exposes those URIs. The
 implemented `dismiss_expired_timers` action uses the standard no-URI behavior instead.
 
-Ordinary notifications remain outside the integration except for `find_phone`, whose
-documented TTS behavior is essential to that operation and whose `alarm_stream_max`
-implementation restores the prior stream volume inside Companion.
+Ordinary notifications remain outside the integration except for `find_phone`.
+Ringtone mode sends one notification with `ttl: 0`, `priority: high`,
+`channel: alarm_stream`, and `tag: find_phone`. Companion categorises it as an alarm and
+uses the configured alarm-channel sound on the alarm audio stream at its current volume.
+It does not force maximum volume. TTS mode uses `alarm_stream_max`; Companion saves the
+current alarm-stream volume, maximises it for playback, then restores the saved value.
+
+Both modes are deliberately one-shot. The integration does not infer ringtone duration,
+repeat, sleep, create a persistent session, or register a Stop event. Android channel
+sounds are user-configurable, can be arbitrarily long, and may ramp up. Users can repeat
+the Home Assistant action at a device-appropriate interval when desired.

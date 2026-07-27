@@ -103,7 +103,7 @@ Friendly standard-intent actions form a second layer on `command_activity`:
 | `open_settings` / `open_app_settings` | curated public `Settings` actions |
 | `open_camera` / `open_video_camera` | standard still/video camera actions |
 | `open_entity` | existing Companion `entityId:` webview support |
-| `find_phone` | ordered screen wake plus Companion TTS on `alarm_stream_max` |
+| `find_phone` | one screen wake plus ringtone (default) or maximum-volume TTS |
 
 See [the compatibility matrix](docs/COMPATIBILITY.md) for the complete current command inventory and implementation status.
 
@@ -312,21 +312,46 @@ data:
     - {name: enabled, type: boolean, value: true}
 ```
 
-Make a phone audible with Companion TTS. `alarm_stream_max` temporarily raises and
-restores the alarm stream inside Companion. The optional flashlight is off by default
-and remains on until another action turns it off because there is no completion callback.
+`find_phone` performs one audible request per action call and wakes the screen by
+default. Ringtone is the conventional default:
 
-The optional Companion ringer, volume, and interactive sensors are mostly disabled by
-default and are not a reliable prerequisite. `find_phone` therefore does not guess or
-restore their states: alarm-stream restoration is handled by Companion itself, and
-screen wake is idempotent. No delay is inserted because Companion processes each
-notification command independently and its source provides no evidence that a fixed
-sleep improves delivery.
+- sends one immediately delivered, high-priority notification on Companion's
+  `alarm_stream` channel;
+- plays the sound configured for that Android notification channel once at the current
+  alarm-stream volume; and
+- uses the stable `find_phone` tag, so later manual calls update the existing
+  notification while still sounding again.
 
 ```yaml
 action: android_device_control.find_phone
-data: {device_id: 12ab34cd56ef, wake_screen: true, message: Here I am}
+data:
+  device_id: YOUR_DEVICE_ID
 ```
+
+Text to speech is the alternative for maximum audibility. Companion temporarily saves
+the current alarm volume, raises the alarm stream to maximum, speaks the message, and
+restores the saved volume:
+
+```yaml
+action: android_device_control.find_phone
+data:
+  device_id: YOUR_DEVICE_ID
+  sound_mode: tts
+  message: Finding phone
+```
+
+`find_phone` performs one audible Find Phone request per action call. To repeat it, call
+the action repeatedly from a Home Assistant script or automation at whatever interval
+is appropriate for the configured device sound. Android notification-channel sounds
+can have arbitrary durations and may ramp up gradually, so the integration deliberately
+does not assume a repeat interval or create a background session, timer, Stop action, or
+event listener.
+
+The optional Companion ringer, volume, and interactive sensors are mostly disabled by
+default and are not prerequisites. Ringtone mode does not manually change or restore
+alarm volume. Screen wake is idempotent and a failure does not prevent the sound request
+from being attempted. The optional flashlight remains on until another action turns it
+off because there is no completion callback.
 
 ## Intent and provider behavior
 
@@ -448,7 +473,7 @@ is preserved.
 | Kiosk commands | Companion App open in the foreground, kiosk features configured, and **Accept kiosk remote commands** enabled. |
 | Assistant volume | Android 17+ and Home Assistant set as the default assistant. |
 | Friendly activity intents | Display over other apps; a receiving activity must be installed and support the public contract. |
-| Find phone | TTS temporarily maximises and restores the alarm stream; flashlight requires camera permission and is not auto-restored. |
+| Find phone | Ringtone uses the current alarm volume and the configured `alarm_stream` channel sound. TTS temporarily maximises and restores the alarm stream. Flashlight requires camera permission and is not auto-restored. |
 
 When permission is missing, the Companion App may post a notification asking the user to open it, then show the relevant Android settings screen after the command is retried.
 
