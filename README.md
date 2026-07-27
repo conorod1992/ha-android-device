@@ -90,6 +90,21 @@ It never constructs `notify.mobile_app_*` from a device name. All targets are va
 | `kiosk_reload` / `kiosk_default` | same as action name | — |
 | `send_command` | guarded raw command | command message and arbitrary nested data |
 
+Friendly standard-intent actions form a second layer on `command_activity`:
+
+| Action | Public Android/provider contract |
+| --- | --- |
+| `open_url` | `ACTION_VIEW` with an absolute URI |
+| `show_map` / `navigate_to` | `geo:`, Google Maps URLs, or Waze Deep Links |
+| `dial_number` | `ACTION_DIAL` (never calls automatically) |
+| `compose_sms` / `compose_email` | `ACTION_SENDTO` with `smsto:` / `mailto:` |
+| `create_calendar_event` | `ACTION_INSERT` with Calendar event extras |
+| `web_search` | `ACTION_WEB_SEARCH` |
+| `open_settings` / `open_app_settings` | curated public `Settings` actions |
+| `open_camera` / `open_video_camera` | standard still/video camera actions |
+| `open_entity` | existing Companion `entityId:` webview support |
+| `find_phone` | ordered screen wake plus Companion TTS on `alarm_stream_max` |
+
 See [the compatibility matrix](docs/COMPATIBILITY.md) for the complete current command inventory and implementation status.
 
 ## Examples
@@ -177,6 +192,158 @@ data:
 ```
 
 The escape hatch still requires a verified Android Mobile App target. It accepts messages beginning with `command_` and the documented non-prefixed command messages. Prefer typed actions, which provide selectors and validation.
+
+## Friendly intent examples
+
+Open a URL and navigate to either an address or coordinates:
+
+```yaml
+action: android_device_control.open_url
+data: {device_id: 12ab34cd56ef, url: "https://www.home-assistant.io/"}
+```
+
+```yaml
+action: android_device_control.navigate_to
+data:
+  device_id: 12ab34cd56ef
+  location: Dublin Airport
+  provider: google_maps
+  travel_mode: driving
+```
+
+```yaml
+action: android_device_control.navigate_to
+data:
+  device_id: 12ab34cd56ef
+  latitude: 53.4264
+  longitude: -6.2499
+  provider: waze
+```
+
+Dial, compose SMS, or compose email. These actions only open composition UI:
+
+```yaml
+action: android_device_control.dial_number
+data: {device_id: 12ab34cd56ef, phone_number: "+353 1 234 5678"}
+```
+
+```yaml
+action: android_device_control.compose_sms
+data: {device_id: 12ab34cd56ef, recipient: "+3531234567", message: "On my way"}
+```
+
+```yaml
+action: android_device_control.compose_email
+data:
+  device_id: 12ab34cd56ef
+  to: [person@example.com]
+  subject: Meeting notes
+  body: "Hello from Home Assistant"
+```
+
+Open an event editor. Dispatch does not mean the user saved the event:
+
+```yaml
+action: android_device_control.create_calendar_event
+data:
+  device_id: 12ab34cd56ef
+  title: Home Assistant meetup
+  start: "2026-08-01 18:00:00"
+  end: "2026-08-01 19:00:00"
+  location: Dublin
+  attendees: [person@example.com]
+```
+
+Search, open Bluetooth settings, or open Spotify's application details:
+
+```yaml
+action: android_device_control.web_search
+data: {device_id: 12ab34cd56ef, query: Home Assistant Android}
+```
+
+```yaml
+action: android_device_control.open_settings
+data: {device_id: 12ab34cd56ef, page: bluetooth}
+```
+
+```yaml
+action: android_device_control.open_app_settings
+data: {device_id: 12ab34cd56ef, app: com.spotify.music, page: details}
+```
+
+Open either camera mode or an entity More Info panel:
+
+```yaml
+action: android_device_control.open_camera
+data: {device_id: 12ab34cd56ef}
+```
+
+```yaml
+action: android_device_control.open_video_camera
+data: {device_id: 12ab34cd56ef}
+```
+
+```yaml
+action: android_device_control.open_entity
+data: {device_id: 12ab34cd56ef, entity_id: light.kitchen}
+```
+
+Control a common media app without knowing its package ID:
+
+```yaml
+action: android_device_control.media_control
+data: {device_id: 12ab34cd56ef, media_command: pause, app: com.spotify.music}
+```
+
+Use structured extras with either advanced intent action. Supported types are
+`string`, `boolean`, `integer`, `long`, `float`, `double`, and `integer_list`.
+Strings are encoded centrally so commas, colons, spaces, and Unicode
+survive the Companion wire format. Raw `extras` remain accepted, but the two forms
+cannot be combined.
+
+```yaml
+action: android_device_control.launch_activity
+data:
+  device_id: 12ab34cd56ef
+  intent_action: android.intent.action.SEND
+  mime_type: text/plain
+  structured_extras:
+    - {name: android.intent.extra.TEXT, type: string, value: "Hello, café"}
+    - {name: enabled, type: boolean, value: true}
+```
+
+Make a phone audible with Companion TTS. `alarm_stream_max` temporarily raises and
+restores the alarm stream inside Companion. The optional flashlight is off by default
+and remains on until another action turns it off because there is no completion callback.
+
+The optional Companion ringer, volume, and interactive sensors are mostly disabled by
+default and are not a reliable prerequisite. `find_phone` therefore does not guess or
+restore their states: alarm-stream restoration is handled by Companion itself, and
+screen wake is idempotent. No delay is inserted because Companion processes each
+notification command independently and its source provides no evidence that a fixed
+sleep improves delivery.
+
+```yaml
+action: android_device_control.find_phone
+data: {device_id: 12ab34cd56ef, wake_screen: true, message: Here I am}
+```
+
+## Intent and provider behavior
+
+The default map behavior uses Android's standard `geo:` resolution. Android has no
+generic public "start turn-by-turn navigation" intent, so the default provider opens
+the destination in a capable handler. Choose Google Maps or Waze to explicitly request
+navigation through documented public URLs. Google Maps supports driving, walking,
+bicycling, and transit; Waze exposes driving behavior. Provider URLs can fall back to
+a web experience when the app is absent.
+
+`open_settings` contains only public Android constants. Each mapping records its
+minimum API level; older Android versions and OEM builds may not resolve every page.
+App permissions are reached through Application details because Android does not
+publish a stable package-scoped permissions activity contract.
+
+Camera actions only open the receiving camera. The transport cannot receive an Android
+activity result, capture remotely, or retrieve media.
 
 ## Alarms and timers
 
@@ -280,6 +447,8 @@ is preserved.
 | Notification channels | Channels exist on Android 8+. Removing a channel does not erase its Android system settings. |
 | Kiosk commands | Companion App open in the foreground, kiosk features configured, and **Accept kiosk remote commands** enabled. |
 | Assistant volume | Android 17+ and Home Assistant set as the default assistant. |
+| Friendly activity intents | Display over other apps; a receiving activity must be installed and support the public contract. |
+| Find phone | TTS temporarily maximises and restores the alarm stream; flashlight requires camera permission and is not auto-restored. |
 
 When permission is missing, the Companion App may post a notification asking the user to open it, then show the relevant Android settings screen after the command is retried.
 
