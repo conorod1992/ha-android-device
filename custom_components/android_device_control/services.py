@@ -203,7 +203,7 @@ async def _async_handle(
 
 
 async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Send conspicuous, ordered commands without guessing state to restore."""
+    """Send one conspicuous, ordered request to each selected device."""
     data = dict(call.data)
     targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
     commands = []
@@ -211,18 +211,35 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
         commands.append(payload("command_screen_on", {"command": "reset"}))
     if data["flashlight"]:
         commands.append(payload("command_flashlight", {"command": "turn_on"}))
-    commands.append(
-        payload(
-            "TTS",
-            {"tts_text": data["message"], "media_stream": "alarm_stream_max"},
+    if data["sound_mode"] == "tts":
+        commands.append(
+            payload(
+                "TTS",
+                {"tts_text": data["message"], "media_stream": "alarm_stream_max"},
+            )
         )
-    )
+    else:
+        commands.append(
+            {
+                "title": "Find Phone",
+                "message": "Finding phone",
+                "data": {
+                    "ttl": 0,
+                    "priority": "high",
+                    "channel": "alarm_stream",
+                    "tag": "find_phone",
+                },
+            }
+        )
     failures = []
     for target in targets:
-        try:
-            for command in commands:
+        target_failed = False
+        for command in commands:
+            try:
                 await _async_send(hass, target, command)
-        except HomeAssistantError:
+            except HomeAssistantError:
+                target_failed = True
+        if target_failed:
             failures.append(target.device_name)
     if failures:
         raise HomeAssistantError(
@@ -672,7 +689,10 @@ def async_register_services(hass: HomeAssistant) -> None:
             {
                 vol.Optional("wake_screen", default=True): cv.boolean,
                 vol.Optional("flashlight", default=False): cv.boolean,
-                vol.Optional("message", default="Here I am"): _non_empty,
+                vol.Optional("sound_mode", default="ringtone"): vol.In(
+                    {"ringtone", "tts"}
+                ),
+                vol.Optional("message", default="Finding phone"): _non_empty,
             }
         ),
     )

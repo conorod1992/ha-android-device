@@ -399,18 +399,68 @@ async def test_all_targets_are_resolved_before_dispatch(
     assert hass.services.calls == []
 
 
-async def test_find_phone_command_order_and_defaults(hass: SimpleNamespace) -> None:
+async def test_find_phone_defaults_to_one_ringtone_notification(
+    hass: SimpleNamespace,
+) -> None:
     validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
     await hass.services.handlers["find_phone"](
         ServiceCall(hass, DOMAIN, "find_phone", validated)
     )
     assert [call[2]["message"] for call in hass.services.calls] == [
         "command_screen_on",
-        "TTS",
+        "Finding phone",
     ]
-    assert hass.services.calls[-1][2]["data"] == {
-        "tts_text": "Here I am",
-        "media_stream": "alarm_stream_max",
+    assert hass.services.calls[0][2] == {
+        "message": "command_screen_on",
+        "data": {"command": "reset"},
+        "target": ["webhook-phone"],
+    }
+    ringtone = hass.services.calls[-1][2]
+    assert ringtone["title"] == "Find Phone"
+    assert ringtone["data"] == {
+        "ttl": 0,
+        "priority": "high",
+        "channel": "alarm_stream",
+        "tag": "find_phone",
+    }
+    assert "alert_once" not in ringtone["data"]
+
+
+async def test_find_phone_explicit_ringtone_matches_default(
+    hass: SimpleNamespace,
+) -> None:
+    validated = hass.services.schemas["find_phone"](
+        {
+            "device_id": "phone",
+            "sound_mode": "ringtone",
+            "message": "Ignored in ringtone mode",
+        }
+    )
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert hass.services.calls[-1][2]["message"] == "Finding phone"
+    assert hass.services.calls[-1][2]["data"]["channel"] == "alarm_stream"
+
+
+@pytest.mark.parametrize("message", ["Finding phone", "Find café: now, please"])
+async def test_find_phone_tts_default_and_custom_message(
+    hass: SimpleNamespace, message: str
+) -> None:
+    data = {"device_id": "phone", "sound_mode": "tts"}
+    if message != "Finding phone":
+        data["message"] = message
+    validated = hass.services.schemas["find_phone"](data)
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert hass.services.calls[-1][2] == {
+        "message": "TTS",
+        "data": {
+            "tts_text": message,
+            "media_stream": "alarm_stream_max",
+        },
+        "target": ["webhook-phone"],
     }
 
 
@@ -420,6 +470,7 @@ async def test_find_phone_optional_flashlight_is_ordered(hass: SimpleNamespace) 
             "device_id": "phone",
             "wake_screen": False,
             "flashlight": True,
+            "sound_mode": "tts",
             "message": "Find me",
         }
     )
@@ -432,6 +483,51 @@ async def test_find_phone_optional_flashlight_is_ordered(hass: SimpleNamespace) 
     ]
 
 
+async def test_find_phone_stable_tag_still_alerts_each_call(
+    hass: SimpleNamespace,
+) -> None:
+    for _ in range(2):
+        validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
+        await hass.services.handlers["find_phone"](
+            ServiceCall(hass, DOMAIN, "find_phone", validated)
+        )
+    ringtone_calls = [
+        call[2] for call in hass.services.calls if call[2]["message"] == "Finding phone"
+    ]
+    assert len(ringtone_calls) == 2
+    assert {call["data"]["tag"] for call in ringtone_calls} == {"find_phone"}
+    assert all("alert_once" not in call["data"] for call in ringtone_calls)
+
+
+async def test_find_phone_dispatches_to_each_device_independently(
+    monkeypatch: pytest.MonkeyPatch, hass: SimpleNamespace
+) -> None:
+    second = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    first = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
+    monkeypatch.setattr(
+        services_module, "resolve_android_targets", lambda _hass, _ids: [first, second]
+    )
+    validated = hass.services.schemas["find_phone"](
+        {"device_id": ["phone", "tablet"], "wake_screen": False}
+    )
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert [call[2]["target"] for call in hass.services.calls] == [
+        ["webhook-phone"],
+        ["webhook-tablet"],
+    ]
+
+
+def test_find_phone_rejects_invalid_sound_mode(hass: SimpleNamespace) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["find_phone"](
+            {"device_id": "phone", "sound_mode": "loop_forever"}
+        )
+
+
 async def test_find_phone_reports_transport_failure(hass: SimpleNamespace) -> None:
     hass.services.failure = HomeAssistantError("transport failed")
     validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
@@ -439,3 +535,7 @@ async def test_find_phone_reports_transport_failure(hass: SimpleNamespace) -> No
         await hass.services.handlers["find_phone"](
             ServiceCall(hass, DOMAIN, "find_phone", validated)
         )
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_screen_on",
+        "Finding phone",
+    ]
