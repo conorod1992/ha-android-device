@@ -1,5 +1,6 @@
 {
   "services": {
+    "check_device": "mdi:cellphone-check",
     "clear_notification": "mdi:notification-clear-all",
     "configure_ble_transmitter": "mdi:bluetooth-settings",
     "dismiss_alarm": "mdi:alarm-off",
@@ -53,6 +54,7 @@
     "set_wake_word_detection": "mdi:account-voice",
     "show_alarms": "mdi:alarm",
     "show_timers": "mdi:timer-outline",
+    "speak": "mdi:text-to-speech",
     "snooze_alarm": "mdi:alarm-snooze",
     "stop_tts": "mdi:text-to-speech-off",
     "turn_screen_on": "mdi:cellphone-screenshot",

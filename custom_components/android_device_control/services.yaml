@@ -81,12 +81,14 @@ turn_screen_on:
 set_screen_brightness:
   fields:
     device_id: *device_field
-    level:
+    brightness:
       required: true
       selector:
         number:
           min: 0
-          max: 255
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
           mode: slider
 
 set_auto_brightness:
@@ -442,6 +444,7 @@ kiosk_set_brightness:
         number:
           min: 0
           max: 100
+          step: 1
           unit_of_measurement: "%"
           mode: slider
 
@@ -735,3 +738,27 @@ find_phone:
       default: Finding phone
       selector:
         text:
+
+speak:
+  fields:
+    device_id: *device_field
+    message:
+      required: true
+      example: The washing machine has finished.
+      selector:
+        text:
+          multiline: true
+    playback_mode:
+      default: normal
+      selector:
+        select:
+          translation_key: tts_playback_mode
+          options: [normal, alarm, alarm_max]
+
+check_device:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: mobile_app

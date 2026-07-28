@@ -37,6 +37,11 @@ VOLUME_STREAMS = {
     "system": "system_stream",
     "assistant": "assistant_stream",
 }
+TTS_PLAYBACK_MODES = {
+    "normal": None,
+    "alarm": "alarm_stream",
+    "alarm_max": "alarm_stream_max",
+}
 HIGH_ACCURACY_MODES = {"turn_off", "turn_on", "force_off", "force_on"}
 PERSISTENT_MODES = {"always", "home_wifi", "screen_on", "never"}
 BLE_SETTINGS = {
@@ -123,6 +128,14 @@ def payload(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     if data:
         result["data"] = data
     return result
+
+
+def tts_payload(text: str, playback_mode: str = "normal") -> dict[str, Any]:
+    """Build an official Android Companion text-to-speech notification."""
+    data = {"tts_text": text}
+    if media_stream := TTS_PLAYBACK_MODES[playback_mode]:
+        data["media_stream"] = media_stream
+    return payload("TTS", data)
 
 
 def _string_extra(name: str, value: str) -> str:

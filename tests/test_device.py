@@ -14,13 +14,22 @@ DATA_CONFIG_ENTRIES = "config_entries"
 
 @pytest.fixture
 def hass() -> SimpleNamespace:
+    phone = SimpleNamespace(id="phone", name="Pixel 9", name_by_user=None)
     services = SimpleNamespace(has_service=Mock(return_value=True))
     return SimpleNamespace(
         data={
             MOBILE_APP_DOMAIN: {
                 DATA_CONFIG_ENTRIES: {
-                    "webhook-phone": SimpleNamespace(data={"os_name": "Android"})
-                }
+                    "webhook-phone": SimpleNamespace(
+                        data={
+                            "os_name": "Android",
+                            "os_version": "14",
+                            "app_name": "Home Assistant",
+                            "app_version": "2026.7.1-full",
+                        }
+                    )
+                },
+                "devices": {"webhook-phone": phone},
             }
         },
         services=services,
@@ -90,3 +99,53 @@ def test_deduplicates_multiple_devices(
     monkeypatch.setattr(device_module, "resolve_android_target", resolver)
     assert len(device_module.resolve_android_targets(hass, ["phone", "phone"])) == 1
     resolver.assert_called_once_with(hass, "phone")
+
+
+def test_inspects_ready_android_device(hass: SimpleNamespace) -> None:
+    result = device_module.inspect_mobile_app_device(hass, "phone")
+    assert result["status"] == "ready"
+    assert result["ready"] is True
+    assert result["verified"] == {
+        "device_exists": True,
+        "mobile_app_device": True,
+        "registration_exists": True,
+        "push_supported": True,
+        "notify_target_available": True,
+    }
+    assert result["metadata"] == {
+        "os_name": "Android",
+        "os_version": "14",
+        "is_android": True,
+        "app_name": "Home Assistant",
+        "app_version": "2026.7.1-full",
+        "notify_service": "notify.mobile_app_pixel_9",
+    }
+    assert "Android 13 and newer" in result["compatibility_observations"][0]
+    assert result["execution"]["guaranteed"] is False
+
+
+def test_inspection_returns_structured_result_for_missing_device(
+    hass: SimpleNamespace,
+) -> None:
+    result = device_module.inspect_mobile_app_device(hass, "missing")
+    assert result["status"] == "device_not_found"
+    assert result["ready"] is False
+    assert result["verified"]["device_exists"] is False
+
+
+def test_inspection_reports_missing_push(
+    hass: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(device_module, "supports_push", lambda _hass, _id: False)
+    result = device_module.inspect_mobile_app_device(hass, "phone")
+    assert result["status"] == "push_unavailable"
+    assert result["verified"]["registration_exists"] is True
+    assert result["verified"]["push_supported"] is False
+    assert "push channel" in result["compatibility_observations"][-1]
+
+
+def test_discovers_registered_android_devices(hass: SimpleNamespace) -> None:
+    devices = device_module.discover_android_devices(hass)
+    assert [(item["device_id"], item["device_name"]) for item in devices] == [
+        ("phone", "Pixel 9")
+    ]

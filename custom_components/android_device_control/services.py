@@ -10,7 +10,7 @@ from functools import partial
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
@@ -24,6 +24,7 @@ from .commands import (
     MEDIA_COMMANDS,
     PERSISTENT_MODES,
     RINGER_MODES,
+    TTS_PLAYBACK_MODES,
     VOLUME_STREAMS,
     WEEKDAY_NUMBERS,
     ble_configuration_payload,
@@ -40,9 +41,10 @@ from .commands import (
     show_timers_payload,
     snooze_alarm_payload,
     toggle_payload,
+    tts_payload,
 )
 from .const import *
-from .device import AndroidTarget, resolve_android_targets
+from .device import AndroidTarget, inspect_mobile_app_device, resolve_android_targets
 from .intents import (
     APP_SETTINGS,
     SETTINGS,
@@ -151,6 +153,19 @@ def _media_builder(data: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _screen_brightness_builder(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert friendly whole percentages, retaining the old raw YAML field."""
+    if "brightness" in data:
+        percentage = data["brightness"]
+        # Integer half-up rounding keeps both endpoints exact and avoids float drift.
+        raw_level = (percentage * 255 + 50) // 100
+    elif "level" in data:
+        raw_level = data["level"]
+    else:
+        raise vol.Invalid("Brightness is required")
+    return payload("command_screen_brightness_level", {"command": raw_level})
+
+
 async def _async_send(
     hass: HomeAssistant, target: AndroidTarget, notify_payload: dict[str, Any]
 ) -> None:
@@ -212,12 +227,7 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
     if data["flashlight"]:
         commands.append(payload("command_flashlight", {"command": "turn_on"}))
     if data["sound_mode"] == "tts":
-        commands.append(
-            payload(
-                "TTS",
-                {"tts_text": data["message"], "media_stream": "alarm_stream_max"},
-            )
-        )
+        commands.append(tts_payload(data["message"], "alarm_max"))
     else:
         commands.append(
             {
@@ -247,6 +257,11 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
             translation_key="dispatch_failed",
             translation_placeholders={"devices": ", ".join(failures)},
         )
+
+
+async def _async_check_device(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
+    """Return compatibility facts without sending anything to the device."""
+    return inspect_mobile_app_device(hass, call.data[ATTR_DEVICE_ID])
 
 
 def _register(
@@ -333,12 +348,23 @@ def async_register_services(hass: HomeAssistant) -> None:
     _register(
         hass,
         SERVICE_SET_SCREEN_BRIGHTNESS,
-        _schema(
-            {vol.Required("level"): vol.All(vol.Coerce(int), vol.Range(min=0, max=255))}
+        vol.Any(
+            _schema(
+                {
+                    vol.Required("brightness"): vol.All(
+                        vol.Coerce(int), vol.Range(min=0, max=100)
+                    )
+                }
+            ),
+            _schema(
+                {
+                    vol.Required("level"): vol.All(
+                        vol.Coerce(int), vol.Range(min=0, max=255)
+                    )
+                }
+            ),
         ),
-        lambda data: payload(
-            "command_screen_brightness_level", {"command": data["level"]}
-        ),
+        _screen_brightness_builder,
     )
     _register(
         hass,
@@ -695,6 +721,28 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("message", default="Finding phone"): _non_empty,
             }
         ),
+    )
+    _register(
+        hass,
+        SERVICE_SPEAK,
+        _schema(
+            {
+                vol.Required("message"): _non_empty,
+                vol.Optional("playback_mode", default="normal"): vol.In(
+                    TTS_PLAYBACK_MODES
+                ),
+            }
+        ),
+        lambda data: tts_payload(data["message"], data["playback_mode"]),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CHECK_DEVICE,
+        partial(_async_check_device, hass),
+        schema=vol.Schema(
+            {vol.Required(ATTR_DEVICE_ID): _non_empty}, extra=vol.PREVENT_EXTRA
+        ),
+        supports_response=SupportsResponse.ONLY,
     )
 
 

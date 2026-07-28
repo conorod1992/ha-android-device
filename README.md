@@ -32,7 +32,12 @@ Android Device Control only confirms that Home Assistant dispatched the request.
 
 Copy `custom_components/android_device_control` into the `custom_components` directory in your Home Assistant configuration, restart Home Assistant, then add the integration in **Settings → Devices & services**.
 
-No device mapping is required. Action device selectors show Mobile App devices; runtime validation rejects iOS and registrations without push support.
+Setup discovers existing official Android Companion App registrations and shows their
+friendly names and readiness. No device or `notify.mobile_app_*` mapping is required.
+This is an action-only integration: it does not create normal control entities. After
+setup, open an Automation or Script and choose an **Android Device Control** action.
+If setup finds no Android device, it explains how to register one but still allows the
+single integration entry to be created.
 
 ## Device targeting
 
@@ -55,7 +60,7 @@ It never constructs `notify.mobile_app_*` from a device name. All targets are va
 | `media_control` | `command_media` | media command, package name |
 | `stop_tts` | `command_stop_tts` | — |
 | `turn_screen_on` | `command_screen_on` | optional keep-screen-on behavior |
-| `set_screen_brightness` | `command_screen_brightness_level` | 0–255 |
+| `set_screen_brightness` | `command_screen_brightness_level` | `brightness`: 0–100%, converted to 0–255 |
 | `set_auto_brightness` | `command_auto_screen_brightness` | enabled |
 | `set_screen_timeout` | `command_screen_off_timeout` | friendly duration, converted to milliseconds |
 | `open_webview` | `command_webview` | path or `entityId:domain.entity` |
@@ -89,6 +94,8 @@ It never constructs `notify.mobile_app_*` from a device name. All targets are va
 | `kiosk_set_volume` | same as action name | 0–100% |
 | `kiosk_reload` / `kiosk_default` | same as action name | — |
 | `send_command` | guarded raw command | command message and arbitrary nested data |
+| `speak` | Companion TTS notification | text; normal, alarm, or maximum alarm playback |
+| `check_device` | no command sent | structured registration and compatibility response |
 
 Friendly standard-intent actions form a second layer on `command_activity`:
 
@@ -119,6 +126,22 @@ data:
     - 78ab90cd12ef
   mode: vibrate
 ```
+
+Set screen brightness using a percentage. The integration converts it to Android's
+0–255 scale with deterministic half-up rounding (`0% → 0`, `50% → 128`,
+`100% → 255`):
+
+```yaml
+action: android_device_control.set_screen_brightness
+data:
+  device_id: 12ab34cd56ef
+  brightness: 50
+```
+
+For backwards compatibility, existing YAML using raw `level: 0..255` continues to
+work. The raw field is hidden from the friendly action editor and is deprecated for
+new automations. `set_volume` remains an absolute Android stream level; it is not a
+percentage. Kiosk brightness and volume remain validated 0–100% values.
 
 Set a 30-second screen timeout:
 
@@ -353,6 +376,43 @@ alarm volume. Screen wake is idempotent and a failure does not prevent the sound
 from being attempted. The optional flashlight remains on until another action turns it
 off because there is no completion callback.
 
+### Speak on an Android device
+
+`speak` wraps the official Companion TTS payload. Normal playback uses the music stream;
+`alarm` uses the alarm stream; and `alarm_max` temporarily raises the alarm stream to
+maximum and lets Companion restore it after playback.
+
+```yaml
+action: android_device_control.speak
+data:
+  device_id: 12ab34cd56ef
+  message: The washing machine has finished.
+  playback_mode: normal
+```
+
+Dispatch only confirms that Home Assistant handed the request to Mobile App push. TTS
+locale/engine health, audio state, Android restrictions, Companion settings, and device
+settings can still prevent playback. `find_phone` continues to reuse maximum-alarm TTS
+internally and otherwise keeps its existing behavior.
+
+### Check device compatibility
+
+`check_device` is read-only and returns Home Assistant action response data. It reports
+the selected device and registration, OS/app metadata, push and notify-target
+availability, a readiness status, and metadata-based observations such as the Android
+13+ Bluetooth restriction. It does not contact the phone.
+
+```yaml
+action: android_device_control.check_device
+data:
+  device_id: 12ab34cd56ef
+response_variable: android_check
+```
+
+The response separates verified Home Assistant facts from compatibility observations
+and explicitly marks on-device execution as unverified. It never claims Android
+permissions are granted because Mobile App registration data does not prove that.
+
 ## Intent and provider behavior
 
 The default map behavior uses Android's standard `geo:` resolution. Android has no
@@ -474,6 +534,7 @@ is preserved.
 | Assistant volume | Android 17+ and Home Assistant set as the default assistant. |
 | Friendly activity intents | Display over other apps; a receiving activity must be installed and support the public contract. |
 | Find phone | Ringtone uses the current alarm volume and the configured `alarm_stream` channel sound. TTS temporarily maximises and restores the alarm stream. Flashlight requires camera permission and is not auto-restored. |
+| Speak | Normal TTS uses the music stream; alarm modes use the alarm stream. Dispatch cannot guarantee playback. |
 
 When permission is missing, the Companion App may post a notification asking the user to open it, then show the relevant Android settings screen after the command is retried.
 
