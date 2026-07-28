@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import voluptuous as vol
-from homeassistant.core import ServiceCall
+from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.android_device_control import services as services_module
@@ -19,11 +19,20 @@ class FakeServices:
         self.handlers = {}
         self.schemas = {}
         self.calls = []
+        self.responses = {}
         self.failure: Exception | None = None
 
-    def async_register(self, domain, name, handler, *, schema) -> None:
+    def async_register(
+        self,
+        domain,
+        name,
+        handler,
+        schema=None,
+        supports_response=SupportsResponse.NONE,
+    ) -> None:
         self.handlers[name] = handler
         self.schemas[name] = schema
+        self.responses[name] = supports_response
 
     async def async_call(self, domain, service, data, *, blocking) -> None:
         self.calls.append((domain, service, data, blocking))
@@ -91,6 +100,17 @@ async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
             "set_screen_brightness",
             {"level": 200},
             {"message": "command_screen_brightness_level", "data": {"command": 200}},
+        ),
+        (
+            "speak",
+            {"message": "Laundry finished", "playback_mode": "alarm"},
+            {
+                "message": "TTS",
+                "data": {
+                    "tts_text": "Laundry finished",
+                    "media_stream": "alarm_stream",
+                },
+            },
         ),
         (
             "set_auto_brightness",
@@ -356,12 +376,94 @@ async def test_every_action_payload(
 def test_numeric_bounds(hass: SimpleNamespace) -> None:
     with pytest.raises(vol.Invalid):
         hass.services.schemas["set_screen_brightness"](
-            {"device_id": "phone", "level": 256}
+            {"device_id": "phone", "brightness": 101}
         )
     with pytest.raises(vol.Invalid):
         hass.services.schemas["set_high_accuracy_interval"](
             {"device_id": "phone", "interval": 4}
         )
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["kiosk_set_brightness"](
+            {"device_id": "phone", "level": -1}
+        )
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["kiosk_set_volume"]({"device_id": "phone", "volume": 101})
+
+
+@pytest.mark.parametrize(
+    ("percentage", "raw"),
+    [(0, 0), (1, 3), (50, 128), (99, 252), (100, 255)],
+)
+async def test_screen_brightness_percentage_rounding(
+    hass: SimpleNamespace, percentage: int, raw: int
+) -> None:
+    outgoing = await call_action(
+        hass, "set_screen_brightness", {"brightness": percentage}
+    )
+    assert outgoing["data"]["command"] == raw
+
+
+def test_screen_brightness_keeps_legacy_raw_level(hass: SimpleNamespace) -> None:
+    validated = hass.services.schemas["set_screen_brightness"](
+        {"device_id": "phone", "level": 200}
+    )
+    assert validated["level"] == 200
+
+
+def test_screen_brightness_rejects_percentage_and_raw_together(
+    hass: SimpleNamespace,
+) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["set_screen_brightness"](
+            {"device_id": "phone", "brightness": 50, "level": 128}
+        )
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["set_screen_brightness"]({"device_id": "phone"})
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_data"),
+    [
+        ("normal", {"tts_text": "Hello"}),
+        ("alarm", {"tts_text": "Hello", "media_stream": "alarm_stream"}),
+        (
+            "alarm_max",
+            {"tts_text": "Hello", "media_stream": "alarm_stream_max"},
+        ),
+    ],
+)
+async def test_speak_payload_and_dispatch(
+    hass: SimpleNamespace, mode: str, expected_data: dict
+) -> None:
+    outgoing = await call_action(
+        hass, "speak", {"message": "Hello", "playback_mode": mode}
+    )
+    assert outgoing == {
+        "message": "TTS",
+        "data": expected_data,
+        "target": ["webhook-phone"],
+    }
+
+
+def test_speak_requires_text(hass: SimpleNamespace) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["speak"]({"device_id": "phone", "message": "   "})
+
+
+async def test_check_device_returns_response_data(
+    monkeypatch: pytest.MonkeyPatch, hass: SimpleNamespace
+) -> None:
+    expected = {"device_id": "phone", "ready": True}
+    monkeypatch.setattr(
+        services_module, "inspect_mobile_app_device", lambda _hass, _id: expected
+    )
+    validated = hass.services.schemas["check_device"]({"device_id": "phone"})
+    response = await hass.services.handlers["check_device"](
+        ServiceCall(hass, DOMAIN, "check_device", validated, return_response=True)
+    )
+    assert response == expected
+    assert hass.services.responses["check_device"] is SupportsResponse.ONLY
+    assert hass.services.calls == []
 
 
 @pytest.mark.parametrize("package_name", ["", "spotify", "com.example-app", "a..b"])

@@ -20,6 +20,7 @@ from custom_components.android_device_control.commands import (
     show_timers_payload,
     snooze_alarm_payload,
     toggle_payload,
+    tts_payload,
 )
 
 
@@ -29,6 +30,17 @@ def test_toggle_payload() -> None:
         "data": {"command": "turn_on"},
     }
     assert toggle_payload("command_flashlight", False)["data"]["command"] == "turn_off"
+
+
+def test_tts_payload_uses_only_official_playback_fields() -> None:
+    assert tts_payload("Hello") == {"message": "TTS", "data": {"tts_text": "Hello"}}
+    assert tts_payload("Warning", "alarm_max") == {
+        "message": "TTS",
+        "data": {
+            "tts_text": "Warning",
+            "media_stream": "alarm_stream_max",
+        },
+    }
 
 
 def test_screen_timeout_converts_to_milliseconds() -> None:

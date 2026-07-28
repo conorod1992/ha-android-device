@@ -20,7 +20,7 @@ Inventory reviewed against the official Android command list and Companion App s
 | `command_launch_app` | Implemented | `launch_app` |
 | `command_media` | Implemented | `media_control`; all eight documented media operations |
 | `command_ringer_mode` | Implemented | `set_ringer_mode` |
-| `command_screen_brightness_level` | Implemented | `set_screen_brightness` |
+| `command_screen_brightness_level` | Implemented | `set_screen_brightness`; friendly 0–100% converted to raw 0–255, with legacy raw YAML retained |
 | `command_screen_off_timeout` | Implemented | `set_screen_timeout` |
 | `command_screen_on` | Implemented | `turn_screen_on` |
 | `command_stop_tts` | Implemented | `stop_tts` |
@@ -100,3 +100,16 @@ Both modes are deliberately one-shot. The integration does not infer ringtone du
 repeat, sleep, create a persistent session, or register a Stop event. Android channel
 sounds are user-configurable, can be arbitrarily long, and may ramp up. Users can repeat
 the Home Assistant action at a device-appropriate interval when desired.
+
+The friendly `speak` action is the other deliberately supported notification wrapper.
+It uses Companion's documented `message: TTS` contract and exposes only default music
+playback, `alarm_stream`, and `alarm_stream_max`. Dispatch cannot prove playback; the
+device TTS engine, locale, audio state, Android restrictions, and Companion settings
+remain authoritative. `find_phone` reuses the same TTS payload builder without changing
+its behavior.
+
+`check_device` sends no command. Its action response reports facts available from Home
+Assistant's device registry and current Mobile App registration: registration presence,
+reported OS/app metadata, push support, and exact notify-target resolution. Compatibility
+observations are metadata-based, while Android permissions and actual command execution
+are explicitly left unknown.
