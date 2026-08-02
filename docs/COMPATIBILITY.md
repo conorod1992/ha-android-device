@@ -64,7 +64,7 @@ contracts instead of raw fields.
 | `open_app_settings` | details, notifications, overlay, write settings | Permissions are reached through Application details |
 | `open_camera` / `open_video_camera` | standard media capture actions | No activity result, remote capture, or retrieval |
 | `open_entity` | Companion `entityId:` webview | Reuses `command_webview` |
-| `find_phone` | one screen wake + alarm-channel notification or TTS | Ringtone uses current alarm volume; TTS temporarily maximises and restores it |
+| `find_phone` / `stop_find_phone` | bounded alarm-channel notification or TTS session | Immediate first attempt, configurable interval and maximum, per-device restart semantics, actionable Stop button |
 
 The settings list deliberately omits candidates without a stable public contract,
 including a package-scoped permissions deep link and Android Auto. App-specific battery
@@ -90,16 +90,32 @@ Mobile App registration nor a documented Companion sensor exposes those URIs. Th
 implemented `dismiss_expired_timers` action uses the standard no-URI behavior instead.
 
 Ordinary notifications remain outside the integration except for `find_phone`.
-Ringtone mode sends one notification with `ttl: 0`, `priority: high`,
+Each ringtone attempt sends a notification with `ttl: 0`, `priority: high`,
 `channel: alarm_stream`, and `tag: find_phone`. Companion categorises it as an alarm and
 uses the configured alarm-channel sound on the alarm audio stream at its current volume.
 It does not force maximum volume. TTS mode uses `alarm_stream_max`; Companion saves the
 current alarm-stream volume, maximises it for playback, then restores the saved value.
+When requested, TTS mode also posts a low-importance control notification so the same
+actionable Stop button is available without adding a second audible alert.
 
-Both modes are deliberately one-shot. The integration does not infer ringtone duration,
-repeat, sleep, create a persistent session, or register a Stop event. Android channel
-sounds are user-configurable, can be arbitrarily long, and may ramp up. Users can repeat
-the Home Assistant action at a device-appropriate interval when desired.
+Sessions repeat by default, are bounded to 10 attempts at 15-second intervals, and are
+keyed by Home Assistant device ID. Screen wake and flashlight-on are first-attempt-only.
+Later attempts send only ringtone or TTS. A new session replaces the old session for the
+same device; other devices are independent. Users should choose an interval appropriate
+to their configured alarm-channel sound, which can be long or ramp gradually.
+
+Stop uses Companion's documented `command_stop_tts` and `clear_notification` commands.
+Clearing a notification cannot guarantee Android immediately terminates channel audio
+already playing. Flashlight-off is automatic only while an in-memory session proves
+Find Phone enabled it, or when the caller explicitly opts in after that state is lost.
+Action metadata includes the Home Assistant device and session IDs, so a button can
+still perform conservative cleanup after Home Assistant restarts.
+
+Session state is deliberately ephemeral: it is neither stored nor restored, and no
+attempts resume after restart. Unload and Home Assistant shutdown cancel tasks and
+remove listeners without broadcasting cleanup to every device. Companion sensors are
+not required; interactive state is not treated as a stop signal because waking the
+screen would make it true.
 
 The friendly `speak` action is the other deliberately supported notification wrapper.
 It uses Companion's documented `message: TTS` contract and exposes only default music

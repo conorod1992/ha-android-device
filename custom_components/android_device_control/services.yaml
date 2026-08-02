@@ -738,6 +738,36 @@ find_phone:
       default: Finding phone
       selector:
         text:
+    repeat:
+      default: true
+      selector:
+        boolean:
+    max_attempts:
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          mode: box
+    repeat_interval:
+      default:
+        seconds: 15
+      selector:
+        duration:
+          enable_day: false
+    show_stop_action:
+      default: true
+      selector:
+        boolean:
+
+stop_find_phone:
+  fields:
+    device_id: *device_field
+    turn_off_flashlight:
+      default: false
+      selector:
+        boolean:
 
 speak:
   fields:

@@ -16,5 +16,5 @@ async def async_setup_entry(hass: HomeAssistant, _entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, _entry: ConfigEntry) -> bool:
     """Unload Android Device Control."""
-    async_unregister_services(hass)
+    await async_unregister_services(hass)
     return True
