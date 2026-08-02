@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
+from datetime import timedelta
 from functools import partial
 from typing import Any
 
@@ -45,6 +46,11 @@ from .commands import (
 )
 from .const import *
 from .device import AndroidTarget, inspect_mobile_app_device, resolve_android_targets
+from .find_phone import (
+    FindPhoneOptions,
+    async_remove_find_phone_manager,
+    get_find_phone_manager,
+)
 from .intents import (
     APP_SETTINGS,
     SETTINGS,
@@ -89,6 +95,15 @@ def _non_empty(value: Any) -> str:
     if not result:
         raise vol.Invalid("Value must not be empty")
     return result
+
+
+def _find_phone_repeat_interval(value: Any) -> timedelta:
+    """Validate and normalize the delay between Find Phone attempts."""
+    duration = cv.positive_time_period_dict(value)
+    seconds = duration.total_seconds()
+    if not MIN_FIND_PHONE_REPEAT_INTERVAL <= seconds <= MAX_FIND_PHONE_REPEAT_INTERVAL:
+        raise vol.Invalid("Repeat interval must be between 3 seconds and 10 minutes")
+    return duration
 
 
 def _package_id(value: Any) -> str:
@@ -218,40 +233,31 @@ async def _async_handle(
 
 
 async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Send one conspicuous, ordered request to each selected device."""
+    """Start independent, bounded Find Phone sessions for selected devices."""
     data = dict(call.data)
     targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
-    commands = []
-    if data["wake_screen"]:
-        commands.append(payload("command_screen_on", {"command": "reset"}))
-    if data["flashlight"]:
-        commands.append(payload("command_flashlight", {"command": "turn_on"}))
-    if data["sound_mode"] == "tts":
-        commands.append(tts_payload(data["message"], "alarm_max"))
-    else:
-        commands.append(
-            {
-                "title": "Find Phone",
-                "message": "Finding phone",
-                "data": {
-                    "ttl": 0,
-                    "priority": "high",
-                    "channel": "alarm_stream",
-                    "tag": "find_phone",
-                },
-            }
-        )
-    failures = []
-    for target in targets:
-        target_failed = False
-        for command in commands:
-            try:
-                await _async_send(hass, target, command)
-            except HomeAssistantError:
-                target_failed = True
-        if target_failed:
-            failures.append(target.device_name)
+    options = FindPhoneOptions(
+        wake_screen=data["wake_screen"],
+        flashlight=data["flashlight"],
+        sound_mode=data["sound_mode"],
+        message=data["message"],
+        repeat=data["repeat"],
+        max_attempts=data["max_attempts"],
+        repeat_interval=data["repeat_interval"].total_seconds(),
+        show_stop_action=data["show_stop_action"],
+    )
+    manager = get_find_phone_manager(hass, partial(_async_send, hass))
+    results = await asyncio.gather(
+        *(manager.async_start(target, options) for target in targets),
+        return_exceptions=True,
+    )
+    failures = [
+        target.device_name
+        for target, result in zip(targets, results, strict=True)
+        if isinstance(result, BaseException)
+    ]
     if failures:
+        _LOGGER.warning("Find Phone could not start for %s", ", ".join(failures))
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
@@ -259,9 +265,68 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
         )
 
 
+async def _async_stop_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Stop selected sessions and perform best-effort phone-side cleanup."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    manager = get_find_phone_manager(hass, partial(_async_send, hass))
+    await asyncio.gather(
+        *(
+            manager.async_stop(
+                target,
+                turn_off_flashlight=data["turn_off_flashlight"],
+            )
+            for target in targets
+        )
+    )
+
+
 async def _async_check_device(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Return compatibility facts without sending anything to the device."""
     return inspect_mobile_app_device(hass, call.data[ATTR_DEVICE_ID])
+
+
+def _register_find_phone_services(hass: HomeAssistant) -> None:
+    """Register Find Phone actions and initialize their event manager."""
+    get_find_phone_manager(hass, partial(_async_send, hass))
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FIND_PHONE,
+        partial(_async_find_phone, hass),
+        schema=_schema(
+            {
+                vol.Optional("wake_screen", default=True): cv.boolean,
+                vol.Optional("flashlight", default=False): cv.boolean,
+                vol.Optional("sound_mode", default="ringtone"): vol.In(
+                    {"ringtone", "tts"}
+                ),
+                vol.Optional("message", default="Finding phone"): _non_empty,
+                vol.Optional("repeat", default=True): cv.boolean,
+                vol.Optional(
+                    "max_attempts", default=DEFAULT_FIND_PHONE_MAX_ATTEMPTS
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(
+                        min=MIN_FIND_PHONE_ATTEMPTS,
+                        max=MAX_FIND_PHONE_ATTEMPTS,
+                    ),
+                ),
+                vol.Optional(
+                    "repeat_interval",
+                    default={"seconds": DEFAULT_FIND_PHONE_REPEAT_INTERVAL},
+                ): _find_phone_repeat_interval,
+                vol.Optional("show_stop_action", default=True): cv.boolean,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_FIND_PHONE,
+        partial(_async_stop_find_phone, hass),
+        schema=_schema(
+            {vol.Optional("turn_off_flashlight", default=False): cv.boolean}
+        ),
+    )
 
 
 def _register(
@@ -707,21 +772,7 @@ def async_register_services(hass: HomeAssistant) -> None:
             "command_webview", {"command": f"entityId:{data['entity_id']}"}
         ),
     )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_FIND_PHONE,
-        partial(_async_find_phone, hass),
-        schema=_schema(
-            {
-                vol.Optional("wake_screen", default=True): cv.boolean,
-                vol.Optional("flashlight", default=False): cv.boolean,
-                vol.Optional("sound_mode", default="ringtone"): vol.In(
-                    {"ringtone", "tts"}
-                ),
-                vol.Optional("message", default="Finding phone"): _non_empty,
-            }
-        ),
-    )
+    _register_find_phone_services(hass)
     _register(
         hass,
         SERVICE_SPEAK,
@@ -746,7 +797,8 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
 
 
-def async_unregister_services(hass: HomeAssistant) -> None:
+async def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister integration actions."""
+    await async_remove_find_phone_manager(hass)
     for service in list(hass.services.async_services().get(DOMAIN, {})):
         hass.services.async_remove(DOMAIN, service)

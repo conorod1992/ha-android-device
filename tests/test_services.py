@@ -1,5 +1,6 @@
 """Tests for action schemas, mappings, dispatch, and failures."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -39,16 +40,40 @@ class FakeServices:
         if self.failure:
             raise self.failure
 
+    def async_services(self):
+        return {DOMAIN: {name: {} for name in self.handlers}}
+
+    def async_remove(self, domain, service) -> None:
+        self.handlers.pop(service, None)
+        self.schemas.pop(service, None)
+
+
+class FakeBus:
+    """Minimal event listener registry."""
+
+    def __init__(self) -> None:
+        self.listeners = []
+
+    def async_listen(self, event_type, listener):
+        item = (event_type, listener)
+        self.listeners.append(item)
+        return lambda: self.listeners.remove(item) if item in self.listeners else None
+
+    def async_listen_once(self, event_type, listener):
+        return self.async_listen(event_type, listener)
+
 
 @pytest.fixture
-def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    instance = SimpleNamespace(services=FakeServices())
+async def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    instance = SimpleNamespace(services=FakeServices(), bus=FakeBus(), data={})
+    instance.async_create_task = lambda coro, name: asyncio.create_task(coro, name=name)
     target = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
     monkeypatch.setattr(
         services_module, "resolve_android_targets", lambda hass, ids: [target]
     )
     services_module.async_register_services(instance)
-    return instance
+    yield instance
+    await services_module.async_remove_find_phone_manager(instance)
 
 
 async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
@@ -501,7 +526,7 @@ async def test_all_targets_are_resolved_before_dispatch(
     assert hass.services.calls == []
 
 
-async def test_find_phone_defaults_to_one_ringtone_notification(
+async def test_find_phone_defaults_to_immediate_ringtone_notification(
     hass: SimpleNamespace,
 ) -> None:
     validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
@@ -519,12 +544,15 @@ async def test_find_phone_defaults_to_one_ringtone_notification(
     }
     ringtone = hass.services.calls[-1][2]
     assert ringtone["title"] == "Find Phone"
-    assert ringtone["data"] == {
+    assert {
+        key: ringtone["data"][key] for key in ("ttl", "priority", "channel", "tag")
+    } == {
         "ttl": 0,
         "priority": "high",
         "channel": "alarm_stream",
         "tag": "find_phone",
     }
+    assert ringtone["data"]["actions"][0]["title"] == "Stop ringing"
     assert "alert_once" not in ringtone["data"]
 
 
@@ -574,6 +602,7 @@ async def test_find_phone_optional_flashlight_is_ordered(hass: SimpleNamespace) 
             "flashlight": True,
             "sound_mode": "tts",
             "message": "Find me",
+            "show_stop_action": False,
         }
     )
     await hass.services.handlers["find_phone"](
@@ -630,13 +659,123 @@ def test_find_phone_rejects_invalid_sound_mode(hass: SimpleNamespace) -> None:
         )
 
 
-async def test_find_phone_reports_transport_failure(hass: SimpleNamespace) -> None:
+def test_find_phone_repeat_defaults_and_legacy_yaml(hass: SimpleNamespace) -> None:
+    validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
+    assert validated["repeat"] is True
+    assert validated["max_attempts"] == 10
+    assert validated["repeat_interval"].total_seconds() == 15
+    assert validated["show_stop_action"] is True
+
+
+@pytest.mark.parametrize("max_attempts", [0, 101])
+def test_find_phone_rejects_attempt_bounds(
+    hass: SimpleNamespace, max_attempts: int
+) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["find_phone"](
+            {"device_id": "phone", "max_attempts": max_attempts}
+        )
+
+
+@pytest.mark.parametrize(
+    "repeat_interval",
+    [{"seconds": 2}, {"minutes": 10, "seconds": 1}],
+)
+def test_find_phone_rejects_interval_bounds(
+    hass: SimpleNamespace, repeat_interval: dict
+) -> None:
+    with pytest.raises(vol.Invalid):
+        hass.services.schemas["find_phone"](
+            {"device_id": "phone", "repeat_interval": repeat_interval}
+        )
+
+
+async def test_find_phone_repeat_false_sends_exactly_one_sound(
+    hass: SimpleNamespace,
+) -> None:
+    validated = hass.services.schemas["find_phone"](
+        {"device_id": "phone", "repeat": False}
+    )
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    assert (
+        sum(call[2]["message"] == "Finding phone" for call in hass.services.calls) == 1
+    )
+
+
+async def test_stop_find_phone_without_session_is_conservative(
+    hass: SimpleNamespace,
+) -> None:
+    validated = hass.services.schemas["stop_find_phone"]({"device_id": "phone"})
+    await hass.services.handlers["stop_find_phone"](
+        ServiceCall(hass, DOMAIN, "stop_find_phone", validated)
+    )
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_stop_tts",
+        "clear_notification",
+    ]
+    assert hass.services.calls[-1][2]["data"]["tag"] == "find_phone"
+
+
+async def test_stop_find_phone_can_explicitly_clean_flashlight_after_restart(
+    hass: SimpleNamespace,
+) -> None:
+    validated = hass.services.schemas["stop_find_phone"](
+        {"device_id": "phone", "turn_off_flashlight": True}
+    )
+    await hass.services.handlers["stop_find_phone"](
+        ServiceCall(hass, DOMAIN, "stop_find_phone", validated)
+    )
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_stop_tts",
+        "clear_notification",
+        "command_flashlight",
+    ]
+    assert hass.services.calls[-1][2]["data"]["command"] == "turn_off"
+
+
+async def test_stop_find_phone_is_idempotent(hass: SimpleNamespace) -> None:
+    validated = hass.services.schemas["stop_find_phone"]({"device_id": "phone"})
+    call = ServiceCall(hass, DOMAIN, "stop_find_phone", validated)
+
+    await hass.services.handlers["stop_find_phone"](call)
+    await hass.services.handlers["stop_find_phone"](call)
+
+    assert [call[2]["message"] for call in hass.services.calls] == [
+        "command_stop_tts",
+        "clear_notification",
+        "command_stop_tts",
+        "clear_notification",
+    ]
+
+
+async def test_unregister_cancels_find_phone_and_removes_listeners_and_services(
+    hass: SimpleNamespace,
+) -> None:
+    validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
+    manager = hass.data[DOMAIN][services_module.DATA_FIND_PHONE_MANAGER]
+    session = manager.sessions["phone"]
+
+    await services_module.async_unregister_services(hass)
+
+    assert session.task.cancelled()
+    assert hass.bus.listeners == []
+    assert hass.services.handlers == {}
+    assert DOMAIN not in hass.data
+
+
+async def test_find_phone_transient_transport_failure_still_starts(
+    hass: SimpleNamespace,
+) -> None:
     hass.services.failure = HomeAssistantError("transport failed")
     validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
-    with pytest.raises(HomeAssistantError):
-        await hass.services.handlers["find_phone"](
-            ServiceCall(hass, DOMAIN, "find_phone", validated)
-        )
+    await hass.services.handlers["find_phone"](
+        ServiceCall(hass, DOMAIN, "find_phone", validated)
+    )
     assert [call[2]["message"] for call in hass.services.calls] == [
         "command_screen_on",
         "Finding phone",
