@@ -255,28 +255,100 @@ async def test_matching_notification_action_stops_correct_session(
     recorder = Recorder()
     manager = FindPhoneManager(FakeHass(), recorder.send)
     session = await manager.async_start(phone, options())
+    initial_count = len(recorder.calls)
     monkeypatch.setattr(
         find_phone_module,
         "resolve_android_targets",
-        lambda _hass, _ids: [phone],
+        lambda *_args: pytest.fail("active sessions must not resolve targets again"),
     )
     event = SimpleNamespace(
         data={
             "action": (f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}{session.session_id}"),
-            "tag": FIND_PHONE_NOTIFICATION_TAG,
-            FIND_PHONE_EVENT_DEVICE_ID: phone.device_id,
-            FIND_PHONE_EVENT_SESSION_ID: session.session_id,
         }
     )
 
     await manager._async_handle_notification_action(event)
+    await asyncio.sleep(0)
 
     assert session.stop_event.is_set()
+    assert session.task.done()
+    assert session.attempts_sent == 1
     assert manager.sessions == {}
-    assert [command["message"] for _, command in recorder.calls[-2:]] == [
+    assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
         "command_stop_tts",
         "clear_notification",
     ]
+
+
+async def test_exact_action_stops_only_matching_session(
+    phone: AndroidTarget,
+) -> None:
+    tablet = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    recorder = Recorder()
+    manager = FindPhoneManager(FakeHass(), recorder.send)
+    phone_session = await manager.async_start(phone, options())
+    tablet_session = await manager.async_start(tablet, options())
+
+    await manager._async_handle_notification_action(
+        SimpleNamespace(
+            data={
+                "action": (
+                    f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}"
+                    f"{tablet_session.session_id}"
+                )
+            }
+        )
+    )
+
+    assert tablet_session.stop_event.is_set()
+    assert phone_session.stop_event.is_set() is False
+    assert manager.sessions == {phone.device_id: phone_session}
+    await manager.async_shutdown()
+
+
+async def test_unmatched_action_stops_sole_session_as_fallback(
+    caplog: pytest.LogCaptureFixture, phone: AndroidTarget
+) -> None:
+    recorder = Recorder()
+    manager = FindPhoneManager(FakeHass(), recorder.send)
+    session = await manager.async_start(phone, options())
+
+    await manager._async_handle_notification_action(
+        SimpleNamespace(
+            data={"action": f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}altered"}
+        )
+    )
+
+    assert session.stop_event.is_set()
+    assert manager.sessions == {}
+    assert "stopping the sole active session as a fallback" in caplog.text
+
+
+async def test_unmatched_action_is_ignored_with_multiple_sessions(
+    caplog: pytest.LogCaptureFixture, phone: AndroidTarget
+) -> None:
+    tablet = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    recorder = Recorder()
+    manager = FindPhoneManager(FakeHass(), recorder.send)
+    phone_session = await manager.async_start(phone, options())
+    tablet_session = await manager.async_start(tablet, options())
+    initial_count = len(recorder.calls)
+
+    await manager._async_handle_notification_action(
+        SimpleNamespace(
+            data={"action": f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}altered"}
+        )
+    )
+
+    assert phone_session.stop_event.is_set() is False
+    assert tablet_session.stop_event.is_set() is False
+    assert len(recorder.calls) == initial_count
+    assert "metadata is insufficient" in caplog.text
+    await manager.async_shutdown()
 
 
 async def test_unrelated_or_stale_notification_action_is_ignored(
@@ -303,6 +375,31 @@ async def test_unrelated_or_stale_notification_action_is_ignored(
 
     assert manager.sessions[phone.device_id] is session
     assert len(recorder.calls) == initial_count
+    await manager.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        FIND_PHONE_NOTIFICATION_ACTION_PREFIX,
+        f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}   ",
+    ],
+)
+async def test_malformed_find_phone_action_is_ignored(
+    action: str, caplog: pytest.LogCaptureFixture, phone: AndroidTarget
+) -> None:
+    recorder = Recorder()
+    manager = FindPhoneManager(FakeHass(), recorder.send)
+    session = await manager.async_start(phone, options())
+    initial_count = len(recorder.calls)
+
+    await manager._async_handle_notification_action(
+        SimpleNamespace(data={"action": action})
+    )
+
+    assert manager.sessions[phone.device_id] is session
+    assert len(recorder.calls) == initial_count
+    assert "malformed Find Phone stop action" in caplog.text
     await manager.async_shutdown()
 
 

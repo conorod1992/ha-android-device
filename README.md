@@ -391,7 +391,11 @@ data:
 When enabled (the default), the notification includes a **Stop ringing** button. It and
 the explicit action below interrupt the waiting interval, prevent later attempts, stop
 Companion TTS, and clear the tagged notification. If the active session turned on the
-flashlight, Stop also turns it off.
+flashlight, Stop also turns it off. The button normally identifies its active session
+from a unique action token, without depending on custom fields being echoed in the
+Companion event. As a compatibility fallback, a prefixed but unmatched Stop action can
+stop the sole active Find Phone session; it is ignored when multiple sessions make the
+target ambiguous.
 
 ```yaml
 action: android_device_control.stop_find_phone
@@ -403,7 +407,9 @@ Sessions are in memory only. A Home Assistant restart cancels future attempts an
 not resume them. `stop_find_phone` remains useful after a restart: it still sends Stop
 TTS and clears the notification. It does not turn off the flashlight without a known
 session unless `turn_off_flashlight: true` is explicitly supplied, which protects an
-unrelated manually enabled flashlight.
+unrelated manually enabled flashlight. A notification Stop pressed after restart also
+performs best-effort cleanup when the Companion event includes enough device and
+session information to identify the intended phone safely.
 
 The optional Companion ringer, volume, and interactive sensors are mostly disabled by
 default and are not prerequisites. Interactive state is not used as an automatic stop

@@ -31,6 +31,18 @@ _LOGGER = logging.getLogger(__name__)
 SendCommand = Callable[[AndroidTarget, dict[str, Any]], Awaitable[None]]
 
 
+def _session_id_from_action(action: object) -> str | None:
+    """Extract a non-empty session ID from a Find Phone action token."""
+    if not isinstance(action, str) or not action.startswith(
+        FIND_PHONE_NOTIFICATION_ACTION_PREFIX
+    ):
+        return None
+    session_id = action.removeprefix(FIND_PHONE_NOTIFICATION_ACTION_PREFIX)
+    if not session_id or session_id.isspace():
+        return None
+    return session_id
+
+
 @dataclass(frozen=True, slots=True)
 class FindPhoneOptions:
     """Validated options for one Find Phone request."""
@@ -286,35 +298,70 @@ class FindPhoneManager:
                 )
 
     async def _async_handle_notification_action(self, event: Event) -> None:
-        """Handle only safely attributable Find Phone Stop buttons."""
+        """Stop an active session or perform conservative restart cleanup."""
         action = event.data.get("action")
         if not isinstance(action, str) or not action.startswith(
             FIND_PHONE_NOTIFICATION_ACTION_PREFIX
         ):
             return
 
-        device_id = event.data.get(FIND_PHONE_EVENT_DEVICE_ID)
-        session_id = event.data.get(FIND_PHONE_EVENT_SESSION_ID)
-        expected_action = f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}{session_id}"
-        if (
-            not isinstance(device_id, str)
-            or not device_id
-            or not isinstance(session_id, str)
-            or not session_id
-            or action != expected_action
-            or event.data.get("tag") != FIND_PHONE_NOTIFICATION_TAG
-        ):
-            _LOGGER.warning(
-                "Ignoring a Find Phone notification action that cannot be safely "
-                "associated with an Android device"
-            )
+        session_id = _session_id_from_action(action)
+        if session_id is None:
+            _LOGGER.warning("Ignoring malformed Find Phone stop action")
             return
 
-        current = self.sessions.get(device_id)
+        matching_session = next(
+            (
+                session
+                for session in self.sessions.values()
+                if session.session_id == session_id
+            ),
+            None,
+        )
+        if matching_session is not None:
+            await self._async_stop_session(matching_session, cleanup=True)
+            return
+
+        device_id = event.data.get(FIND_PHONE_EVENT_DEVICE_ID)
+        metadata_session_id = event.data.get(FIND_PHONE_EVENT_SESSION_ID)
+        restart_device_id = (
+            device_id
+            if isinstance(device_id, str)
+            and bool(device_id)
+            and isinstance(metadata_session_id, str)
+            and metadata_session_id == session_id
+            else None
+        )
+        current = (
+            self.sessions.get(restart_device_id)
+            if restart_device_id is not None
+            else None
+        )
         if current is not None and current.session_id != session_id:
             _LOGGER.warning(
                 "Ignoring stale Find Phone notification action for Android device %s",
                 device_id,
+            )
+            return
+
+        active_sessions = list(self.sessions.values())
+        if len(active_sessions) == 1:
+            _LOGGER.warning(
+                "Find Phone stop action for session %s did not match a current "
+                "session; stopping the sole active session as a fallback",
+                session_id,
+            )
+            await self._async_stop_session(active_sessions[0], cleanup=True)
+            return
+
+        await self._async_restart_cleanup(event, restart_device_id)
+
+    async def _async_restart_cleanup(self, event: Event, device_id: str | None) -> None:
+        """Use trustworthy returned metadata for best-effort post-restart cleanup."""
+        if device_id is None or event.data.get("tag") != FIND_PHONE_NOTIFICATION_TAG:
+            _LOGGER.warning(
+                "Ignoring Find Phone stop action because metadata is insufficient "
+                "for restart-safe cleanup"
             )
             return
 
@@ -334,7 +381,7 @@ class FindPhoneManager:
                 device_id,
             )
             return
-        await self.async_stop(targets[0])
+        await self._async_cleanup(targets[0], turn_off_flashlight=False)
 
     async def _async_handle_hass_stop(self, _event: Event) -> None:
         """Abandon all sessions when Home Assistant stops."""
