@@ -108,8 +108,11 @@ Stop uses Companion's documented `command_stop_tts` and `clear_notification` com
 Clearing a notification cannot guarantee Android immediately terminates channel audio
 already playing. Flashlight-off is automatic only while an in-memory session proves
 Find Phone enabled it, or when the caller explicitly opts in after that state is lost.
-Action metadata includes the Home Assistant device and session IDs, so a button can
-still perform conservative cleanup after Home Assistant restarts.
+The Stop button normally finds an active session from its unique action token, without
+requiring Companion to return arbitrary custom event fields. A prefixed but unmatched
+action stops the sole active session as a compatibility fallback; ambiguous actions are
+ignored when multiple sessions are active. Returned device and session metadata still
+allows best-effort conservative cleanup after Home Assistant restarts.
 
 Session state is deliberately ephemeral: it is neither stored nor restored, and no
 attempts resume after restart. Unload and Home Assistant shutdown cancel tasks and
