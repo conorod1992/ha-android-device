@@ -94,6 +94,9 @@ It never constructs `notify.mobile_app_*` from a device name. All targets are va
 | `kiosk_set_volume` | same as action name | 0–100% |
 | `kiosk_reload` / `kiosk_default` | same as action name | — |
 | `send_command` | guarded raw command | command message and arbitrary nested data |
+| `notify` / `notify_urgent` | Companion notification | curated normal or immediate/high-priority delivery |
+| `prompt` / `ask_yes_no` / `ask_choice` | actionable notification | one to three validated buttons and an integration event |
+| `notify_until_acknowledged` / `stop_notify_until_acknowledged` | managed notification | bounded, per-device acknowledgement sessions |
 | `speak` | Companion TTS notification | text; normal, alarm, or maximum alarm playback |
 | `check_device` | no command sent | structured registration and compatibility response |
 
@@ -102,6 +105,7 @@ Friendly standard-intent actions form a second layer on `command_activity`:
 | Action | Public Android/provider contract |
 | --- | --- |
 | `open_url` | `ACTION_VIEW` with an absolute URI |
+| `share_text` / `share_url` | `ACTION_SEND` with `text/plain` and structured extras |
 | `show_map` / `navigate_to` | `geo:`, Google Maps URLs, or Waze Deep Links |
 | `dial_number` | `ACTION_DIAL` (never calls automatically) |
 | `compose_sms` / `compose_email` | `ACTION_SENDTO` with `smsto:` / `mailto:` |
@@ -215,6 +219,97 @@ data:
 ```
 
 The escape hatch still requires a verified Android Mobile App target. It accepts messages beginning with `command_` and the documented non-prefixed command messages. Prefer typed actions, which provide selectors and validation.
+
+## Notifications
+
+`notify` sends a deliberately small Android notification payload: message, optional
+title/tag/channel/importance, sticky behavior, and a bounded timeout. `notify_urgent`
+adds Companion's documented immediate delivery request (`ttl: 0`, `priority: high`) and
+defaults to an **Urgent** channel with high requested importance. It does not change
+volume or bypass Android/OEM/user channel settings.
+
+```yaml
+action: android_device_control.notify_urgent
+data:
+  device_id: 12ab34cd56ef
+  title: Water leak
+  message: Check the utility room.
+  tag: water-leak
+```
+
+`prompt`, `ask_yes_no`, and `ask_choice` accept friendly logical IDs and visible labels.
+Companion receives collision-resistant action tokens. A real button press emits
+`android_device_control_notification_action` with `device_id`, `session_id`, logical
+`action_id`, and `tag`; unrelated, stale, or malformed action events are ignored.
+Android currently displays at most three notification actions, so prompts and choices
+are validated to one through three unique actions.
+
+```yaml
+action: android_device_control.ask_choice
+data:
+  device_id: 12ab34cd56ef
+  title: Destination
+  message: Where should I navigate?
+  choices:
+    - {id: home, title: Home}
+    - {id: work, title: Work}
+```
+
+`notify_until_acknowledged` dispatches immediately, then repeats every five minutes by
+default for at most five attempts. Each device has an independent in-memory session.
+A new call with the same device and tag stops and clears the old session before
+replacing it. The acknowledgement button stops future attempts, requests tagged
+notification clearing, and emits
+`android_device_control_notification_acknowledged`. Explicitly stop and clear with
+`stop_notify_until_acknowledged`. Restart/unload cancels future attempts; sessions are
+not persisted.
+
+```yaml
+action: android_device_control.notify_until_acknowledged
+data:
+  device_id: 12ab34cd56ef
+  title: Freezer door
+  message: Please check and acknowledge.
+  tag: freezer-door
+  repeat_interval: {minutes: 5}
+  max_attempts: 5
+```
+
+Home Assistant action responses report dispatch facts and session IDs where applicable.
+They do not claim Android displayed a notification. Only returned Companion button
+events provide evidence of a prompt choice or acknowledgement.
+
+## Send to phone
+
+These actions are grouped by what UI they ask Android or Companion to open:
+
+- **Open:** `open_url`, `open_entity`, `show_map`
+- **Navigate:** `navigate_to`
+- **Share:** `share_text`, `share_url`
+- **Compose:** `dial_number`, `compose_sms`, `compose_email`
+- **Launch/search:** `launch_app`, `web_search`
+
+The existing names remain canonical; no redundant `send_search`, `send_entity`,
+`send_navigation`, phone-number, SMS, email, or location aliases are added. **Open**
+shows a destination, **navigate** requests directions, **compose** pre-fills an editor,
+and **share** invokes Android's `ACTION_SEND` handler. Successful dispatch never means
+the user completed the resulting Android action.
+
+```yaml
+action: android_device_control.share_text
+data:
+  device_id: 12ab34cd56ef
+  text: "The alarm is armed."
+  subject: Home status
+```
+
+```yaml
+action: android_device_control.share_url
+data:
+  device_id: 12ab34cd56ef
+  url: "https://www.home-assistant.io/"
+  text: Worth reading
+```
 
 ## Friendly intent examples
 
@@ -601,7 +696,13 @@ ruff check .
 pytest
 ```
 
-The repository also runs HACS validation and hassfest in GitHub Actions. Protocol research is based on the current [official notification command documentation](https://companion.home-assistant.io/docs/notifications/notification-commands/), [Home Assistant action development guidance](https://developers.home-assistant.io/docs/dev_101_services/), and the current Mobile App implementation in Home Assistant Core.
+The repository also runs HACS validation and hassfest in GitHub Actions. Protocol
+research is based on the current [official notification documentation](https://companion.home-assistant.io/docs/notifications/notifications-basic/),
+[actionable-notification documentation](https://companion.home-assistant.io/docs/notifications/actionable-notifications/),
+[critical-notification documentation](https://companion.home-assistant.io/docs/notifications/critical-notifications/),
+[Android sharing guidance](https://developer.android.com/training/sharing/send),
+[Home Assistant action development guidance](https://developers.home-assistant.io/docs/dev_101_services/),
+and the current Mobile App implementation in Home Assistant Core.
 
 ## License
 

@@ -476,6 +476,184 @@ send_command:
       selector:
         object:
 
+notify: &notification_action
+  fields:
+    device_id: *device_field
+    title:
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      selector:
+        text:
+    channel:
+      selector:
+        text:
+    importance:
+      selector:
+        select:
+          options: [min, low, default, high, max]
+    sticky:
+      default: false
+      selector:
+        boolean:
+    timeout:
+      selector:
+        number:
+          min: 1
+          max: 86400
+          unit_of_measurement: s
+          mode: box
+
+notify_urgent: *notification_action
+
+prompt: &prompt_action
+  fields:
+    device_id: *device_field
+    title:
+      required: true
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      selector:
+        text:
+    actions:
+      required: true
+      example:
+        - {id: yes, title: "Yes"}
+        - {id: no, title: "No"}
+      selector:
+        object:
+
+ask_yes_no:
+  fields:
+    device_id: *device_field
+    title:
+      required: true
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      selector:
+        text:
+    yes_label:
+      default: "Yes"
+      selector:
+        text:
+    no_label:
+      default: "No"
+      selector:
+        text:
+
+ask_choice:
+  fields:
+    device_id: *device_field
+    title:
+      required: true
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      selector:
+        text:
+    choices:
+      required: true
+      example:
+        - {id: home, title: Home}
+        - {id: work, title: Work}
+      selector:
+        object:
+
+notify_until_acknowledged:
+  fields:
+    device_id: *device_field
+    title:
+      required: true
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      default: android_device_control_acknowledgement
+      selector:
+        text:
+    channel:
+      default: Important
+      selector:
+        text:
+    acknowledgement_label:
+      default: Acknowledge
+      selector:
+        text:
+    repeat_interval:
+      default: {minutes: 5}
+      selector:
+        duration:
+          enable_day: false
+    max_attempts:
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 20
+          mode: box
+
+stop_notify_until_acknowledged:
+  fields:
+    device_id: *device_field
+    tag:
+      default: android_device_control_acknowledgement
+      selector:
+        text:
+
+share_text:
+  fields:
+    device_id: *device_field
+    text:
+      required: true
+      selector:
+        text:
+          multiline: true
+    subject:
+      selector:
+        text:
+
+share_url:
+  fields:
+    device_id: *device_field
+    url:
+      required: true
+      example: https://www.home-assistant.io/
+      selector:
+        text:
+    text:
+      selector:
+        text:
+          multiline: true
+    subject:
+      selector:
+        text:
+
 open_url:
   fields:
     device_id: *device_field

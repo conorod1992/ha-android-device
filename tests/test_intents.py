@@ -16,6 +16,8 @@ from custom_components.android_device_control.intents import (
     open_url_payload,
     serialize_extras,
     settings_payload,
+    share_text_payload,
+    share_url_payload,
     show_map_payload,
     sms_payload,
     web_search_payload,
@@ -46,6 +48,43 @@ def test_open_url_can_target_curated_browser() -> None:
         open_url_payload({"url": "https://example.test", "app": "org.mozilla.firefox"})
     )
     assert result["intent_package_name"] == "org.mozilla.firefox"
+
+
+def test_share_text_uses_action_send_and_structured_string_extras() -> None:
+    result = data_of(share_text_payload({"text": "Hello, café", "subject": "News"}))
+
+    assert result == {
+        "intent_action": "android.intent.action.SEND",
+        "intent_type": "text/plain",
+        "intent_extras": (
+            "android.intent.extra.TEXT:Hello%2C%20caf%C3%A9:String.urlencoded,"
+            "android.intent.extra.SUBJECT:News:String.urlencoded"
+        ),
+    }
+
+
+def test_share_url_combines_accompanying_text_and_url() -> None:
+    result = data_of(
+        share_url_payload(
+            {
+                "url": "https://example.test/path?q=1",
+                "text": "Worth reading",
+                "subject": "Article",
+            }
+        )
+    )
+
+    assert result["intent_action"] == "android.intent.action.SEND"
+    assert result["intent_type"] == "text/plain"
+    assert "Worth%20reading%0Ahttps%3A%2F%2Fexample.test" in result["intent_extras"]
+
+
+@pytest.mark.parametrize(
+    "url", ["example.test", "ftp://example.test/file", "https://example.test/a b"]
+)
+def test_share_url_requires_absolute_http_url(url: str) -> None:
+    with pytest.raises(vol.Invalid):
+        share_url_payload({"url": url})
 
 
 def test_show_map_address_and_coordinates_are_encoded() -> None:

@@ -62,9 +62,18 @@ from .intents import (
     navigate_payload,
     open_url_payload,
     settings_payload,
+    share_text_payload,
+    share_url_payload,
     show_map_payload,
     sms_payload,
     web_search_payload,
+)
+from .notifications import (
+    AcknowledgementOptions,
+    async_remove_notification_manager,
+    get_notification_manager,
+    notification_payload,
+    validate_actions,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,6 +82,7 @@ PayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 PACKAGE_ID_PATTERN = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$"
 )
+MAX_ACTION_LABEL_LENGTH = 80
 
 
 def _device_ids(value: Any) -> list[str]:
@@ -97,12 +107,29 @@ def _non_empty(value: Any) -> str:
     return result
 
 
+def _action_label(value: Any) -> str:
+    """Validate a Companion notification button label."""
+    result = _non_empty(value)
+    if len(result) > MAX_ACTION_LABEL_LENGTH:
+        raise vol.Invalid("Action labels must be at most 80 characters")
+    return result
+
+
 def _find_phone_repeat_interval(value: Any) -> timedelta:
     """Validate and normalize the delay between Find Phone attempts."""
     duration = cv.positive_time_period_dict(value)
     seconds = duration.total_seconds()
     if not MIN_FIND_PHONE_REPEAT_INTERVAL <= seconds <= MAX_FIND_PHONE_REPEAT_INTERVAL:
         raise vol.Invalid("Repeat interval must be between 3 seconds and 10 minutes")
+    return duration
+
+
+def _ack_repeat_interval(value: Any) -> timedelta:
+    """Validate the conservative managed-notification repeat interval."""
+    duration = cv.positive_time_period_dict(value)
+    seconds = duration.total_seconds()
+    if not MIN_ACK_REPEAT_INTERVAL <= seconds <= MAX_ACK_REPEAT_INTERVAL:
+        raise vol.Invalid("Repeat interval must be between 1 minute and 1 hour")
     return duration
 
 
@@ -198,6 +225,161 @@ async def _async_send(
     )
 
 
+async def _async_dispatch_with_response(
+    hass: HomeAssistant,
+    targets: list[AndroidTarget],
+    notify_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch to every target and describe dispatch, never device execution."""
+    results = await asyncio.gather(
+        *(_async_send(hass, target, notify_payload) for target in targets),
+        return_exceptions=True,
+    )
+    response = []
+    for target, result in zip(targets, results, strict=True):
+        item: dict[str, Any] = {
+            "device_id": target.device_id,
+            "device_name": target.device_name,
+            "dispatched": not isinstance(result, BaseException),
+        }
+        if isinstance(result, BaseException):
+            item["error"] = str(result)
+        response.append(item)
+    if not any(item["dispatched"] for item in response):
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={
+                "devices": ", ".join(item["device_name"] for item in response)
+            },
+        )
+    return {"devices": response}
+
+
+async def _async_notification(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
+    """Send a curated normal or urgent notification."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    urgent = call.service == SERVICE_NOTIFY_URGENT
+    return await _async_dispatch_with_response(
+        hass, targets, notification_payload(data, urgent=urgent)
+    )
+
+
+async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
+    """Send independent prompts and return their opaque session IDs."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    if call.service == SERVICE_ASK_YES_NO:
+        actions = [
+            {"id": "yes", "title": data["yes_label"]},
+            {"id": "no", "title": data["no_label"]},
+        ]
+    else:
+        actions = data["actions" if call.service == SERVICE_PROMPT else "choices"]
+    manager = get_notification_manager(hass, partial(_async_send, hass))
+    results = await asyncio.gather(
+        *(
+            manager.async_prompt(
+                target,
+                title=data["title"],
+                message=data["message"],
+                tag=data.get("tag"),
+                actions=actions,
+            )
+            for target in targets
+        ),
+        return_exceptions=True,
+    )
+    devices = []
+    for target, result in zip(targets, results, strict=True):
+        item: dict[str, Any] = {
+            "device_id": target.device_id,
+            "device_name": target.device_name,
+            "dispatched": not isinstance(result, BaseException),
+        }
+        if isinstance(result, BaseException):
+            item["error"] = str(result)
+        else:
+            item["session_id"] = result.session_id
+        devices.append(item)
+    if not any(item["dispatched"] for item in devices):
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={
+                "devices": ", ".join(item["device_name"] for item in devices)
+            },
+        )
+    return {"devices": devices}
+
+
+async def _async_notify_until_acknowledged(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict[str, Any]:
+    """Start one bounded managed session per selected Android device."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    options = AcknowledgementOptions(
+        title=data["title"],
+        message=data["message"],
+        tag=data["tag"],
+        channel=data["channel"],
+        acknowledgement_label=data["acknowledgement_label"],
+        repeat_interval=data["repeat_interval"].total_seconds(),
+        max_attempts=data["max_attempts"],
+    )
+    manager = get_notification_manager(hass, partial(_async_send, hass))
+    results = await asyncio.gather(
+        *(manager.async_start_acknowledgement(target, options) for target in targets),
+        return_exceptions=True,
+    )
+    devices = []
+    for target, result in zip(targets, results, strict=True):
+        item: dict[str, Any] = {
+            "device_id": target.device_id,
+            "device_name": target.device_name,
+            "dispatched": not isinstance(result, BaseException),
+        }
+        if isinstance(result, BaseException):
+            item["error"] = str(result)
+        else:
+            item.update({"session_id": result.session_id, "attempt": 1})
+        devices.append(item)
+    if not any(item["dispatched"] for item in devices):
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={
+                "devices": ", ".join(item["device_name"] for item in devices)
+            },
+        )
+    return {"devices": devices}
+
+
+async def _async_stop_notify_until_acknowledged(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict[str, Any]:
+    """Stop selected managed sessions with restart-safe tag clearing."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    manager = get_notification_manager(hass, partial(_async_send, hass))
+    stopped = await asyncio.gather(
+        *(manager.async_stop_acknowledgement(target, data["tag"]) for target in targets)
+    )
+    return {
+        "devices": [
+            {
+                "device_id": target.device_id,
+                "device_name": target.device_name,
+                "stop_requested": True,
+                "active_session_stopped": was_active,
+            }
+            for target, was_active in zip(targets, stopped, strict=True)
+        ]
+    }
+
+
 async def _async_handle(
     hass: HomeAssistant, builder: PayloadBuilder, call: ServiceCall
 ) -> None:
@@ -230,6 +412,19 @@ async def _async_handle(
             translation_key="dispatch_failed",
             translation_placeholders={"devices": ", ".join(failures)},
         )
+
+
+async def _async_handle_with_response(
+    hass: HomeAssistant, builder: PayloadBuilder, call: ServiceCall
+) -> dict[str, Any]:
+    """Build a friendly command and return dispatch-only response data."""
+    data = dict(call.data)
+    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    try:
+        notify_payload = builder(data)
+    except vol.Invalid as err:
+        raise ServiceValidationError(str(err)) from err
+    return await _async_dispatch_with_response(hass, targets, notify_payload)
 
 
 async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -329,17 +524,122 @@ def _register_find_phone_services(hass: HomeAssistant) -> None:
     )
 
 
+def _register_notification_services(hass: HomeAssistant) -> None:
+    """Register curated notification actions and their shared manager."""
+    get_notification_manager(hass, partial(_async_send, hass))
+    common_fields = {
+        vol.Optional("title", default=""): cv.string,
+        vol.Required("message"): _non_empty,
+        vol.Optional("tag"): _non_empty,
+        vol.Optional("channel"): _non_empty,
+        vol.Optional("importance"): vol.In({"min", "low", "default", "high", "max"}),
+        vol.Optional("sticky", default=False): cv.boolean,
+        vol.Optional("timeout"): vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+    }
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_NOTIFY,
+        partial(_async_notification, hass),
+        schema=_schema(common_fields),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    urgent_fields = {
+        vol.Optional("title", default=""): cv.string,
+        vol.Required("message"): _non_empty,
+        vol.Optional("tag"): _non_empty,
+        vol.Optional("channel", default="Urgent"): _non_empty,
+        vol.Optional("importance", default="high"): vol.In({"default", "high", "max"}),
+        vol.Optional("sticky", default=False): cv.boolean,
+        vol.Optional("timeout"): vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+    }
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_NOTIFY_URGENT,
+        partial(_async_notification, hass),
+        schema=_schema(urgent_fields),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    prompt_base = {
+        vol.Required("title"): _non_empty,
+        vol.Required("message"): _non_empty,
+        vol.Optional("tag"): _non_empty,
+    }
+    for name, extra in (
+        (SERVICE_PROMPT, {vol.Required("actions"): validate_actions}),
+        (
+            SERVICE_ASK_YES_NO,
+            {
+                vol.Optional("yes_label", default="Yes"): _action_label,
+                vol.Optional("no_label", default="No"): _action_label,
+            },
+        ),
+        (SERVICE_ASK_CHOICE, {vol.Required("choices"): validate_actions}),
+    ):
+        hass.services.async_register(
+            DOMAIN,
+            name,
+            partial(_async_prompt, hass),
+            schema=_schema(prompt_base | extra),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_NOTIFY_UNTIL_ACKNOWLEDGED,
+        partial(_async_notify_until_acknowledged, hass),
+        schema=_schema(
+            {
+                vol.Required("title"): _non_empty,
+                vol.Required("message"): _non_empty,
+                vol.Optional("tag", default=DEFAULT_ACK_NOTIFICATION_TAG): _non_empty,
+                vol.Optional(
+                    "channel", default=DEFAULT_ACK_NOTIFICATION_CHANNEL
+                ): _non_empty,
+                vol.Optional(
+                    "acknowledgement_label", default="Acknowledge"
+                ): _action_label,
+                vol.Optional(
+                    "repeat_interval",
+                    default={"seconds": DEFAULT_ACK_REPEAT_INTERVAL},
+                ): _ack_repeat_interval,
+                vol.Optional("max_attempts", default=DEFAULT_ACK_MAX_ATTEMPTS): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_ACK_ATTEMPTS, max=MAX_ACK_ATTEMPTS),
+                ),
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_NOTIFY_UNTIL_ACKNOWLEDGED,
+        partial(_async_stop_notify_until_acknowledged, hass),
+        schema=_schema(
+            {vol.Optional("tag", default=DEFAULT_ACK_NOTIFICATION_TAG): _non_empty}
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+
 def _register(
     hass: HomeAssistant,
     name: str,
     schema: vol.Schema,
     builder: PayloadBuilder,
+    *,
+    response: bool = False,
 ) -> None:
     hass.services.async_register(
         DOMAIN,
         name,
-        partial(_async_handle, hass, builder),
+        partial(
+            _async_handle_with_response if response else _async_handle,
+            hass,
+            builder,
+        ),
         schema=schema,
+        supports_response=(
+            SupportsResponse.OPTIONAL if response else SupportsResponse.NONE
+        ),
     )
 
 
@@ -650,7 +950,12 @@ def async_register_services(hass: HomeAssistant) -> None:
         ),
         lambda data: raw_payload(data["command"], data["data"]),
     )
+    _register_notification_services(hass)
+    _register_send_to_phone_services(hass)
 
+
+def _register_send_to_phone_services(hass: HomeAssistant) -> None:
+    """Register friendly open, share, map, and navigation actions."""
     _register(
         hass,
         SERVICE_OPEN_URL,
@@ -662,6 +967,31 @@ def async_register_services(hass: HomeAssistant) -> None:
             }
         ),
         open_url_payload,
+    )
+    _register(
+        hass,
+        SERVICE_SHARE_TEXT,
+        _schema(
+            {
+                vol.Required("text"): _non_empty,
+                vol.Optional("subject", default=""): cv.string,
+            }
+        ),
+        share_text_payload,
+        response=True,
+    )
+    _register(
+        hass,
+        SERVICE_SHARE_URL,
+        _schema(
+            {
+                vol.Required("url"): _non_empty,
+                vol.Optional("text", default=""): cv.string,
+                vol.Optional("subject", default=""): cv.string,
+            }
+        ),
+        share_url_payload,
+        response=True,
     )
     location_fields = {
         vol.Optional("location"): cv.string,
@@ -800,5 +1130,6 @@ def async_register_services(hass: HomeAssistant) -> None:
 async def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister integration actions."""
     await async_remove_find_phone_manager(hass)
+    await async_remove_notification_manager(hass)
     for service in list(hass.services.async_services().get(DOMAIN, {})):
         hass.services.async_remove(DOMAIN, service)

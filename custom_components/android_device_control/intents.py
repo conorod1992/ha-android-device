@@ -13,6 +13,7 @@ from homeassistant.util import dt as dt_util
 from .apps import resolve_app
 
 ACTION_VIEW = "android.intent.action.VIEW"
+ACTION_SEND = "android.intent.action.SEND"
 ACTION_DIAL = "android.intent.action.DIAL"
 ACTION_SENDTO = "android.intent.action.SENDTO"
 ACTION_INSERT = "android.intent.action.INSERT"
@@ -171,6 +172,45 @@ def open_url_payload(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("app") or data.get("package_name"):
         package = resolve_app(data, capability="browser")
     return _activity(ACTION_VIEW, uri=uri, package=package)
+
+
+def share_text_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Open an Android text share handler using the public ACTION_SEND contract."""
+    items = [
+        {
+            "name": "android.intent.extra.TEXT",
+            "type": "string",
+            "value": data["text"],
+        }
+    ]
+    if subject := data.get("subject", "").strip():
+        items.append(
+            {
+                "name": "android.intent.extra.SUBJECT",
+                "type": "string",
+                "value": subject,
+            }
+        )
+    return _activity(
+        ACTION_SEND,
+        mime_type="text/plain",
+        extras=serialize_extras(items),
+    )
+
+
+def share_url_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Share an HTTP(S) URL with optional accompanying text."""
+    url = data["url"].strip()
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or any(char.isspace() for char in url)
+    ):
+        raise vol.Invalid("Enter an absolute HTTP or HTTPS URL with no spaces")
+    accompanying = data.get("text", "").strip()
+    shared_text = f"{accompanying}\n{url}" if accompanying else url
+    return share_text_payload({"text": shared_text, "subject": data.get("subject", "")})
 
 
 def _location(data: dict[str, Any]) -> tuple[str, str | None]:
