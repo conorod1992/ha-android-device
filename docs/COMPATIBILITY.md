@@ -1,6 +1,7 @@
 # Companion command compatibility matrix
 
-Inventory reviewed against the official Android command list and Companion App source on 2026-07-27.
+Inventory reviewed against the official Android command list, notification
+documentation, and Android public intent documentation on 2026-08-12.
 
 ## Companion notification-command wrappers
 
@@ -53,6 +54,8 @@ contracts instead of raw fields.
 | Friendly action | Contract | Compatibility notes |
 | --- | --- | --- |
 | `open_url` | `ACTION_VIEW` | Any absolute URI Android can resolve |
+| `share_text` | `ACTION_SEND` + `text/plain` | Uses encoded `EXTRA_TEXT` and optional `EXTRA_SUBJECT`; opens a handler only |
+| `share_url` | `ACTION_SEND` + `text/plain` | Validated HTTP(S) URL with optional accompanying text and subject |
 | `show_map` | `geo:` / Waze URL | Generic Android, optional Google Maps targeting, Waze web fallback |
 | `navigate_to` | `geo:` / Google Maps URLs / Waze Deep Links | Generic handling cannot guarantee turn-by-turn; provider modes are validated |
 | `dial_number` | `ACTION_DIAL` | UI only; no direct-call action or CALL_PHONE requirement |
@@ -89,7 +92,34 @@ Android's arbitrary running-timer dismissal is deliberately not wrapped. The sta
 Mobile App registration nor a documented Companion sensor exposes those URIs. The
 implemented `dismiss_expired_timers` action uses the standard no-URI behavior instead.
 
-Ordinary notifications remain outside the integration except for `find_phone`.
+## Friendly notifications
+
+The curated `notify` action exposes only documented Android notification fields:
+title, message, tag, channel, importance, sticky, and timeout. `notify_urgent` adds
+documented immediate delivery (`ttl: 0`, `priority: high`) and defaults to an Urgent
+channel. Importance is a channel request: existing channel configuration and Android,
+OEM, Do Not Disturb, and user settings remain authoritative. Neither action forces
+audio volume or claims device-side display.
+
+`prompt`, `ask_yes_no`, and `ask_choice` share one listener and session lookup. Each
+button receives a collision-resistant token; a matching Companion action event is
+translated to `android_device_control_notification_action` with the target device,
+prompt session, logical action ID, and optional tag. Android's documented three-action
+limit is enforced, along with unique safe IDs and non-empty bounded labels. Tokens from
+different devices or prompts cannot cross-trigger, and stale/malformed events are
+ignored.
+
+`notify_until_acknowledged` uses the same listener and unique-token architecture. It
+dispatches immediately and defaults to five total attempts at five-minute intervals.
+Sessions are keyed by device and tag; a same-key start explicitly stops, clears, and
+replaces the previous session while different devices remain independent. A matching
+acknowledgement stops repeats, requests `clear_notification`, and emits
+`android_device_control_notification_acknowledged`. The explicit stop action also
+performs best-effort tagged clearing after restart. Tasks and listeners are cancelled
+on unload/shutdown, state is not persisted, and every repeat loop is finite.
+
+## Find Phone notification behavior
+
 Each ringtone attempt sends a notification with `ttl: 0`, `priority: high`,
 `channel: alarm_stream`, and `tag: find_phone`. Companion categorises it as an alarm and
 uses the configured alarm-channel sound on the alarm audio stream at its current volume.

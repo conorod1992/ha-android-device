@@ -74,6 +74,7 @@ async def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     services_module.async_register_services(instance)
     yield instance
     await services_module.async_remove_find_phone_manager(instance)
+    await services_module.async_remove_notification_manager(instance)
 
 
 async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
@@ -81,6 +82,83 @@ async def call_action(hass: SimpleNamespace, name: str, data: dict) -> dict:
     call = ServiceCall(hass, DOMAIN, name, validated)
     await hass.services.handlers[name](call)
     return hass.services.calls[-1][2]
+
+
+async def test_normal_and_urgent_notification_services_return_dispatch_status(
+    hass: SimpleNamespace,
+) -> None:
+    normal_data = hass.services.schemas["notify"](
+        {
+            "device_id": "phone",
+            "title": "Door",
+            "message": "Opened",
+            "tag": "door",
+            "sticky": True,
+            "timeout": 60,
+        }
+    )
+    normal = await hass.services.handlers["notify"](
+        ServiceCall(hass, DOMAIN, "notify", normal_data)
+    )
+    urgent_data = hass.services.schemas["notify_urgent"](
+        {"device_id": "phone", "message": "Water leak"}
+    )
+    urgent = await hass.services.handlers["notify_urgent"](
+        ServiceCall(hass, DOMAIN, "notify_urgent", urgent_data)
+    )
+
+    assert normal["devices"][0]["dispatched"] is True
+    assert hass.services.calls[-2][2]["data"] == {
+        "tag": "door",
+        "sticky": "true",
+        "timeout": 60,
+    }
+    assert urgent["devices"][0]["dispatched"] is True
+    assert hass.services.calls[-1][2]["data"] == {
+        "channel": "Urgent",
+        "importance": "high",
+        "ttl": 0,
+        "priority": "high",
+    }
+
+
+async def test_yes_no_wrapper_uses_shared_prompt_tokens(hass: SimpleNamespace) -> None:
+    data = hass.services.schemas["ask_yes_no"](
+        {
+            "device_id": "phone",
+            "title": "Door",
+            "message": "Lock it?",
+            "yes_label": "Lock",
+            "no_label": "Leave open",
+        }
+    )
+
+    response = await hass.services.handlers["ask_yes_no"](
+        ServiceCall(hass, DOMAIN, "ask_yes_no", data)
+    )
+    actions = hass.services.calls[-1][2]["data"]["actions"]
+
+    assert response["devices"][0]["session_id"]
+    assert [action["title"] for action in actions] == ["Lock", "Leave open"]
+    assert actions[0]["action"] != actions[1]["action"]
+
+
+def test_choice_schema_rejects_duplicate_ids_and_too_many_choices(
+    hass: SimpleNamespace,
+) -> None:
+    for choices in (
+        [{"id": "home", "title": "Home"}, {"id": "home", "title": "Work"}],
+        [{"id": str(index), "title": str(index)} for index in range(4)],
+    ):
+        with pytest.raises(vol.Invalid):
+            hass.services.schemas["ask_choice"](
+                {
+                    "device_id": "phone",
+                    "title": "Where?",
+                    "message": "Choose",
+                    "choices": choices,
+                }
+            )
 
 
 @pytest.mark.parametrize(
