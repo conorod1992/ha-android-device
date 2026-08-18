@@ -938,6 +938,10 @@ find_phone:
       default: true
       selector:
         boolean:
+    stop_when_unlocked:
+      default: true
+      selector:
+        boolean:
 
 stop_find_phone:
   fields:

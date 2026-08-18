@@ -440,6 +440,7 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
         max_attempts=data["max_attempts"],
         repeat_interval=data["repeat_interval"].total_seconds(),
         show_stop_action=data["show_stop_action"],
+        stop_when_unlocked=data["stop_when_unlocked"],
     )
     manager = get_find_phone_manager(hass, partial(_async_send, hass))
     results = await asyncio.gather(
@@ -511,6 +512,7 @@ def _register_find_phone_services(hass: HomeAssistant) -> None:
                     default={"seconds": DEFAULT_FIND_PHONE_REPEAT_INTERVAL},
                 ): _find_phone_repeat_interval,
                 vol.Optional("show_stop_action", default=True): cv.boolean,
+                vol.Optional("stop_when_unlocked", default=True): cv.boolean,
             }
         ),
     )

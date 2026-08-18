@@ -12,8 +12,14 @@ from custom_components.android_device_control.const import (
     FIND_PHONE_NOTIFICATION_ACTION_PREFIX,
     FIND_PHONE_NOTIFICATION_TAG,
 )
-from custom_components.android_device_control.device import AndroidTarget
+from custom_components.android_device_control.device import (
+    DATA_CONFIG_ENTRIES,
+    MOBILE_APP_DOMAIN,
+    AndroidTarget,
+)
 from custom_components.android_device_control.find_phone import (
+    EVENT_ANDROID_INTENT_RECEIVED,
+    USER_PRESENT_INTENT,
     FindPhoneManager,
     FindPhoneOptions,
     FindPhoneSession,
@@ -69,6 +75,7 @@ def options(**overrides) -> FindPhoneOptions:
         "max_attempts": 3,
         "repeat_interval": 3600,
         "show_stop_action": True,
+        "stop_when_unlocked": True,
     }
     values.update(overrides)
     return FindPhoneOptions(**values)
@@ -480,3 +487,345 @@ async def test_one_device_dispatch_failure_does_not_block_another(
     )
 
     assert successful_targets == ["tablet", "tablet"]
+
+
+def add_registration(hass, target, registration_device_id):
+    hass.data.setdefault(MOBILE_APP_DOMAIN, {}).setdefault(DATA_CONFIG_ENTRIES, {})[
+        target.webhook_id
+    ] = SimpleNamespace(data={"device_id": registration_device_id})
+
+
+def state_change(old, new):
+    return SimpleNamespace(
+        data={
+            "old_state": SimpleNamespace(state=old),
+            "new_state": SimpleNamespace(state=new),
+        }
+    )
+
+
+async def test_user_present_for_target_device_stops_active_session(
+    phone: AndroidTarget,
+) -> None:
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    recorder = Recorder()
+    manager = FindPhoneManager(hass, recorder.send)
+    session = await manager.async_start(phone, options())
+
+    await manager._async_handle_android_intent(
+        SimpleNamespace(
+            data={"intent": USER_PRESENT_INTENT, "device_id": "companion-phone"}
+        )
+    )
+
+    assert session.stop_event.is_set()
+    assert manager.sessions == {}
+    assert [command["message"] for _, command in recorder.calls[-2:]] == [
+        "command_stop_tts",
+        "clear_notification",
+    ]
+
+
+@pytest.mark.parametrize(
+    "event_data",
+    [
+        {"intent": USER_PRESENT_INTENT, "device_id": "companion-other"},
+        {"intent": "android.intent.action.SCREEN_ON", "device_id": "companion-phone"},
+        {"intent": USER_PRESENT_INTENT},
+        {"intent": USER_PRESENT_INTENT, "device_id": ""},
+    ],
+)
+async def test_unrelated_or_unidentifiable_android_intent_is_ignored(
+    event_data, phone: AndroidTarget
+) -> None:
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    manager = FindPhoneManager(hass, Recorder().send)
+    session = await manager.async_start(phone, options())
+
+    await manager._async_handle_android_intent(SimpleNamespace(data=event_data))
+
+    assert manager.sessions == {phone.device_id: session}
+    assert session.stop_event.is_set() is False
+    await manager.async_shutdown()
+
+
+async def test_user_present_stops_only_matching_simultaneous_session(
+    phone: AndroidTarget,
+) -> None:
+    tablet = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    add_registration(hass, tablet, "companion-tablet")
+    manager = FindPhoneManager(hass, Recorder().send)
+    phone_session = await manager.async_start(phone, options())
+    tablet_session = await manager.async_start(tablet, options())
+
+    await manager._async_handle_android_intent(
+        SimpleNamespace(
+            data={"intent": USER_PRESENT_INTENT, "device_id": "companion-phone"}
+        )
+    )
+
+    assert phone_session.stop_event.is_set()
+    assert tablet_session.stop_event.is_set() is False
+    assert manager.sessions == {tablet.device_id: tablet_session}
+    await manager.async_shutdown()
+
+
+async def test_ambiguous_registration_device_id_is_ignored(
+    phone: AndroidTarget,
+) -> None:
+    tablet = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    hass = FakeHass()
+    add_registration(hass, phone, "duplicate-registration")
+    add_registration(hass, tablet, "duplicate-registration")
+    manager = FindPhoneManager(hass, Recorder().send)
+    phone_session = await manager.async_start(phone, options())
+    tablet_session = await manager.async_start(tablet, options())
+
+    await manager._async_handle_android_intent(
+        SimpleNamespace(
+            data={
+                "intent": USER_PRESENT_INTENT,
+                "device_id": "duplicate-registration",
+            }
+        )
+    )
+
+    assert manager.sessions == {
+        phone.device_id: phone_session,
+        tablet.device_id: tablet_session,
+    }
+    await manager.async_shutdown()
+
+
+async def test_keyguard_locked_to_unlocked_stops_corresponding_session(
+    phone: AndroidTarget,
+) -> None:
+    recorder = Recorder()
+    manager = FindPhoneManager(FakeHass(), recorder.send)
+    session = await manager.async_start(phone, options())
+
+    await manager._async_handle_keyguard_state(session, state_change("on", "off"))
+
+    assert session.stop_event.is_set()
+    assert manager.sessions == {}
+
+
+async def test_keyguard_unlock_stops_only_its_device(
+    phone: AndroidTarget,
+) -> None:
+    tablet = AndroidTarget(
+        "tablet", "Pixel Tablet", "webhook-tablet", "mobile_app_pixel_tablet"
+    )
+    manager = FindPhoneManager(FakeHass(), Recorder().send)
+    phone_session = await manager.async_start(phone, options())
+    tablet_session = await manager.async_start(tablet, options())
+
+    await manager._async_handle_keyguard_state(
+        tablet_session, state_change("on", "off")
+    )
+
+    assert tablet_session.stop_event.is_set()
+    assert phone_session.stop_event.is_set() is False
+    assert manager.sessions == {phone.device_id: phone_session}
+    await manager.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("old_state", "new_state"),
+    [("off", "on"), ("on", "unavailable"), ("unavailable", "off")],
+)
+async def test_non_unlock_keyguard_updates_do_not_stop_find_phone(
+    old_state, new_state, phone: AndroidTarget
+) -> None:
+    manager = FindPhoneManager(FakeHass(), Recorder().send)
+    session = await manager.async_start(phone, options())
+
+    await manager._async_handle_keyguard_state(
+        session, state_change(old_state, new_state)
+    )
+
+    assert manager.sessions == {phone.device_id: session}
+    await manager.async_shutdown()
+
+
+async def test_keyguard_update_for_old_session_cannot_stop_replacement(
+    phone: AndroidTarget,
+) -> None:
+    manager = FindPhoneManager(FakeHass(), Recorder().send)
+    old_session = await manager.async_start(phone, options())
+    new_session = await manager.async_start(phone, options())
+
+    await manager._async_handle_keyguard_state(old_session, state_change("on", "off"))
+
+    assert manager.sessions == {phone.device_id: new_session}
+    assert new_session.stop_event.is_set() is False
+    await manager.async_shutdown()
+
+
+async def test_auto_stop_disabled_ignores_intent_and_keyguard(
+    phone: AndroidTarget,
+) -> None:
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    manager = FindPhoneManager(hass, Recorder().send)
+    session = await manager.async_start(phone, options(stop_when_unlocked=False))
+
+    await manager._async_handle_android_intent(
+        SimpleNamespace(
+            data={"intent": USER_PRESENT_INTENT, "device_id": "companion-phone"}
+        )
+    )
+    await manager._async_handle_keyguard_state(session, state_change("on", "off"))
+
+    assert manager.sessions == {phone.device_id: session}
+    assert session.stop_event.is_set() is False
+    await manager.async_shutdown()
+
+
+async def test_simultaneous_unlock_signals_cleanup_once(phone: AndroidTarget) -> None:
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    recorder = Recorder()
+    manager = FindPhoneManager(hass, recorder.send)
+    session = await manager.async_start(phone, options())
+    initial_count = len(recorder.calls)
+
+    await asyncio.gather(
+        manager._async_handle_android_intent(
+            SimpleNamespace(
+                data={"intent": USER_PRESENT_INTENT, "device_id": "companion-phone"}
+            )
+        ),
+        manager._async_handle_keyguard_state(session, state_change("on", "off")),
+    )
+
+    assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
+        "command_stop_tts",
+        "clear_notification",
+    ]
+
+
+async def test_notification_stop_and_unlock_cleanup_once(
+    phone: AndroidTarget,
+) -> None:
+    hass = FakeHass()
+    add_registration(hass, phone, "companion-phone")
+    recorder = Recorder()
+    manager = FindPhoneManager(hass, recorder.send)
+    session = await manager.async_start(phone, options())
+    initial_count = len(recorder.calls)
+
+    await asyncio.gather(
+        manager._async_handle_android_intent(
+            SimpleNamespace(
+                data={"intent": USER_PRESENT_INTENT, "device_id": "companion-phone"}
+            )
+        ),
+        manager._async_handle_notification_action(
+            SimpleNamespace(
+                data={
+                    "action": (
+                        f"{FIND_PHONE_NOTIFICATION_ACTION_PREFIX}{session.session_id}"
+                    )
+                }
+            )
+        ),
+    )
+
+    assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
+        "command_stop_tts",
+        "clear_notification",
+    ]
+
+
+async def test_keyguard_listener_is_scoped_and_removed(
+    monkeypatch: pytest.MonkeyPatch, phone: AndroidTarget
+) -> None:
+    hass = FakeHass()
+    hass.states = SimpleNamespace()
+    subscriptions = []
+
+    monkeypatch.setattr(
+        find_phone_module,
+        "_keyguard_entity_id",
+        lambda _hass, _target: "binary_sensor.pixel_9_keyguard_locked",
+    )
+
+    def track(_hass, entity_ids, listener):
+        subscription = {"entity_ids": entity_ids, "listener": listener, "active": True}
+        subscriptions.append(subscription)
+
+        def unsubscribe():
+            subscription["active"] = False
+
+        return unsubscribe
+
+    monkeypatch.setattr(find_phone_module, "async_track_state_change_event", track)
+    manager = FindPhoneManager(hass, Recorder().send)
+    manager.async_register()
+    session = await manager.async_start(phone, options())
+
+    assert subscriptions[0]["entity_ids"] == ["binary_sensor.pixel_9_keyguard_locked"]
+    assert subscriptions[0]["active"] is True
+    assert [event_type for event_type, _ in hass.bus.listeners].count(
+        EVENT_ANDROID_INTENT_RECEIVED
+    ) == 1
+
+    await manager.async_stop(phone)
+
+    assert subscriptions[0]["active"] is False
+    assert session.keyguard_unsubscribe is None
+    await manager.async_shutdown()
+    assert hass.bus.listeners == []
+
+
+def test_keyguard_discovery_uses_device_registry_metadata(
+    monkeypatch: pytest.MonkeyPatch, phone: AndroidTarget
+) -> None:
+    entries = [
+        SimpleNamespace(
+            entity_id="binary_sensor.pixel_9_interactive",
+            domain="binary_sensor",
+            platform=MOBILE_APP_DOMAIN,
+            unique_id="webhook-phone_interactive",
+            disabled_by=None,
+        ),
+        SimpleNamespace(
+            entity_id="binary_sensor.pixel_9_keyguard_locked",
+            domain="binary_sensor",
+            platform=MOBILE_APP_DOMAIN,
+            unique_id="webhook-phone_keyguard_locked",
+            disabled_by=None,
+        ),
+        SimpleNamespace(
+            entity_id="binary_sensor.other_keyguard_locked",
+            domain="binary_sensor",
+            platform=MOBILE_APP_DOMAIN,
+            unique_id="webhook-other_keyguard_locked",
+            disabled_by=None,
+        ),
+    ]
+    registry = object()
+    monkeypatch.setattr(find_phone_module.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        find_phone_module.er,
+        "async_entries_for_device",
+        lambda actual_registry, device_id: (
+            entries
+            if actual_registry is registry and device_id == phone.device_id
+            else pytest.fail("wrong device registry lookup")
+        ),
+    )
+
+    assert (
+        find_phone_module._keyguard_entity_id(FakeHass(), phone)
+        == "binary_sensor.pixel_9_keyguard_locked"
+    )
