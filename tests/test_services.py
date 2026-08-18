@@ -743,6 +743,7 @@ def test_find_phone_repeat_defaults_and_legacy_yaml(hass: SimpleNamespace) -> No
     assert validated["max_attempts"] == 10
     assert validated["repeat_interval"].total_seconds() == 15
     assert validated["show_stop_action"] is True
+    assert validated["stop_when_unlocked"] is True
 
 
 @pytest.mark.parametrize("max_attempts", [0, 101])

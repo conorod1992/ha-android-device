@@ -433,7 +433,8 @@ data:
 `find_phone` starts a bounded, per-device session. The first audible attempt is sent
 immediately; by default it then repeats every 15 seconds for at most 10 attempts. A new
 call for the same device replaces its existing session. Multiple selected devices run
-independently.
+independently. By default, an active session also stops when the target phone is
+unlocked. Set `stop_when_unlocked: false` to retain manual-only stopping.
 
 Ringtone is the default and:
 
@@ -491,6 +492,22 @@ from a unique action token, without depending on custom fields being echoed in t
 Companion event. As a compatibility fallback, a prefixed but unmatched Stop action can
 stop the sole active Find Phone session; it is ignored when multiple sessions make the
 target ambiguous.
+
+For the quickest unlock detection, configure Android's `USER_PRESENT` broadcast once
+on each target phone:
+
+1. Open **Home Assistant Companion** on the phone.
+2. Go to **Manage Sensors → Last Update Trigger → Intent**.
+3. Add `android.intent.action.USER_PRESENT`.
+4. Force-stop and restart the Companion app.
+
+Companion then sends a device-identified `android.intent_received` event immediately
+after Android reports that phone as user-present. If this intent is not configured,
+Find Phone still works: the enabled Companion **Keyguard Locked** binary sensor is used
+as a fallback when available, and the **Stop ringing** button remains available. The
+integration never treats screen-on or the Interactive sensor as proof of unlock,
+because Find Phone can wake the screen itself. Broadcast delivery and keyguard update
+timing can vary by Android version and device manufacturer.
 
 ```yaml
 action: android_device_control.stop_find_phone

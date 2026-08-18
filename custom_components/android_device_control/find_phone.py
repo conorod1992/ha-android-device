@@ -5,13 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import (
+    ATTR_DEVICE_ID,
+    EVENT_HOMEASSISTANT_STOP,
+    STATE_OFF,
+    STATE_ON,
+)
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .commands import payload, tts_payload
 from .const import (
@@ -24,11 +32,20 @@ from .const import (
     FIND_PHONE_NOTIFICATION_ACTION_PREFIX,
     FIND_PHONE_NOTIFICATION_TAG,
 )
-from .device import AndroidTarget, resolve_android_targets
+from .device import (
+    DATA_CONFIG_ENTRIES,
+    MOBILE_APP_DOMAIN,
+    AndroidTarget,
+    resolve_android_targets,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 SendCommand = Callable[[AndroidTarget, dict[str, Any]], Awaitable[None]]
+
+EVENT_ANDROID_INTENT_RECEIVED = "android.intent_received"
+USER_PRESENT_INTENT = "android.intent.action.USER_PRESENT"
+KEYGUARD_LOCKED_UNIQUE_ID = "keyguard_locked"
 
 
 def _session_id_from_action(action: object) -> str | None:
@@ -55,6 +72,7 @@ class FindPhoneOptions:
     max_attempts: int
     repeat_interval: float
     show_stop_action: bool
+    stop_when_unlocked: bool = True
 
     @property
     def attempts(self) -> int:
@@ -73,6 +91,8 @@ class FindPhoneSession:
     options: FindPhoneOptions
     task: asyncio.Task[None] | None = None
     attempts_sent: int = 0
+    keyguard_unsubscribe: Callable[[], None] | None = None
+    stop_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def flashlight_enabled(self) -> bool:
@@ -101,6 +121,12 @@ class FindPhoneManager:
             )
         )
         self._unsubscribers.append(
+            self.hass.bus.async_listen(
+                EVENT_ANDROID_INTENT_RECEIVED,
+                self._async_handle_android_intent,
+            )
+        )
+        self._unsubscribers.append(
             self.hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_STOP,
                 self._async_handle_hass_stop,
@@ -123,12 +149,17 @@ class FindPhoneManager:
             options=options,
         )
         self.sessions[target.device_id] = session
+        if options.stop_when_unlocked:
+            self._subscribe_keyguard(session)
 
         await self._async_send_attempt(session, first=True)
         session.attempts_sent = 1
 
-        if session.stop_event.is_set() or options.attempts == 1:
-            self._remove_if_current(session)
+        if session.stop_event.is_set():
+            await session.stop_complete.wait()
+            return session
+        if options.attempts == 1:
+            self._finish_without_cleanup(session)
             return session
 
         session.task = self.hass.async_create_task(
@@ -151,6 +182,7 @@ class FindPhoneManager:
         """Cancel all ephemeral work without sending phone-side commands."""
         sessions = list(self.sessions.values())
         for session in sessions:
+            self._unsubscribe_keyguard(session)
             session.stop_event.set()
             if session.task is not None and not session.task.done():
                 session.task.cancel()
@@ -158,6 +190,8 @@ class FindPhoneManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.sessions.clear()
+        for session in sessions:
+            session.stop_complete.set()
         while self._unsubscribers:
             self._unsubscribers.pop()()
 
@@ -187,7 +221,8 @@ class FindPhoneManager:
                 session.device_id,
             )
         finally:
-            self._remove_if_current(session)
+            if not session.stop_event.is_set():
+                self._finish_without_cleanup(session)
 
     async def _async_send_attempt(
         self, session: FindPhoneSession, *, first: bool
@@ -266,15 +301,82 @@ class FindPhoneManager:
         self, session: FindPhoneSession, *, cleanup: bool
     ) -> None:
         """Interrupt one session and optionally clean up its phone state."""
+        if self.sessions.get(session.device_id) is not session:
+            return
+        if session.stop_event.is_set():
+            await session.stop_complete.wait()
+            return
+
         session.stop_event.set()
+        self._unsubscribe_keyguard(session)
         if session.task is not None and session.task is not asyncio.current_task():
             await asyncio.gather(session.task, return_exceptions=True)
-        self._remove_if_current(session)
-        if cleanup:
-            await self._async_cleanup(
-                session.target,
-                turn_off_flashlight=session.flashlight_enabled,
-            )
+        try:
+            if cleanup:
+                await self._async_cleanup(
+                    session.target,
+                    turn_off_flashlight=session.flashlight_enabled,
+                )
+        finally:
+            self._remove_if_current(session)
+            session.stop_complete.set()
+
+    def _subscribe_keyguard(self, session: FindPhoneSession) -> None:
+        """Watch the enabled Companion keyguard sensor for one active session."""
+        if not hasattr(self.hass, "states"):
+            return
+        entity_id = _keyguard_entity_id(self.hass, session.target)
+        if entity_id is None:
+            return
+        session.keyguard_unsubscribe = async_track_state_change_event(
+            self.hass,
+            [entity_id],
+            partial(self._async_handle_keyguard_state, session),
+        )
+
+    @staticmethod
+    def _unsubscribe_keyguard(session: FindPhoneSession) -> None:
+        """Remove a session's state listener at most once."""
+        if session.keyguard_unsubscribe is None:
+            return
+        session.keyguard_unsubscribe()
+        session.keyguard_unsubscribe = None
+
+    async def _async_handle_keyguard_state(
+        self, session: FindPhoneSession, event: Event
+    ) -> None:
+        """Stop only for a locked-to-unlocked transition from this session's sensor."""
+        if not session.options.stop_when_unlocked:
+            return
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        if (
+            old_state is None
+            or new_state is None
+            or old_state.state != STATE_ON
+            or new_state.state != STATE_OFF
+        ):
+            return
+        await self._async_stop_session(session, cleanup=True)
+
+    async def _async_handle_android_intent(self, event: Event) -> None:
+        """Stop the session whose Mobile App registration reported USER_PRESENT."""
+        if event.data.get("intent") != USER_PRESENT_INTENT:
+            return
+        registration_device_id = event.data.get(ATTR_DEVICE_ID)
+        if not isinstance(registration_device_id, str) or not registration_device_id:
+            return
+
+        matches = [
+            session
+            for session in list(self.sessions.values())
+            if session.options.stop_when_unlocked
+            and _registration_device_id(self.hass, session.target)
+            == registration_device_id
+        ]
+        if len(matches) != 1:
+            return
+        await self._async_stop_session(matches[0], cleanup=True)
 
     async def _async_cleanup(
         self, target: AndroidTarget, *, turn_off_flashlight: bool
@@ -391,6 +493,40 @@ class FindPhoneManager:
         """Remove a session without allowing an old task to remove its replacement."""
         if self.sessions.get(session.device_id) is session:
             self.sessions.pop(session.device_id, None)
+
+    def _finish_without_cleanup(self, session: FindPhoneSession) -> None:
+        """Release listeners when a session ends without explicit cleanup."""
+        self._unsubscribe_keyguard(session)
+        self._remove_if_current(session)
+        session.stop_complete.set()
+
+
+def _registration_device_id(hass: HomeAssistant, target: AndroidTarget) -> str | None:
+    """Return the Companion registration ID emitted in android intent events."""
+    entry = (
+        hass.data.get(MOBILE_APP_DOMAIN, {})
+        .get(DATA_CONFIG_ENTRIES, {})
+        .get(target.webhook_id)
+    )
+    if entry is None:
+        return None
+    device_id = entry.data.get(ATTR_DEVICE_ID)
+    return device_id if isinstance(device_id, str) and device_id else None
+
+
+def _keyguard_entity_id(hass: HomeAssistant, target: AndroidTarget) -> str | None:
+    """Find the enabled Mobile App keyguard sensor by registry metadata."""
+    registry = er.async_get(hass)
+    expected_unique_id = f"{target.webhook_id}_{KEYGUARD_LOCKED_UNIQUE_ID}"
+    matches = [
+        entry.entity_id
+        for entry in er.async_entries_for_device(registry, target.device_id)
+        if entry.domain == "binary_sensor"
+        and entry.platform == MOBILE_APP_DOMAIN
+        and entry.unique_id == expected_unique_id
+        and entry.disabled_by is None
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def get_find_phone_manager(
