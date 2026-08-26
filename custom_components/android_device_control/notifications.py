@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -14,6 +16,7 @@ from uuid import uuid4
 import voluptuous as vol
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers.storage import Store
 
 from .commands import payload
 from .const import (
@@ -33,7 +36,11 @@ SendNotification = Callable[[AndroidTarget, dict[str, Any]], Awaitable[None]]
 ACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MAX_PROMPT_ACTIONS = 3
 MAX_PROMPT_SESSIONS = 100
+MAX_PERSISTED_ACKNOWLEDGEMENTS = 100
 MAX_ACTION_TITLE_LENGTH = 80
+STORE_VERSION = 1
+STORE_KEY = f"{DOMAIN}.notification_sessions"
+SESSION_TTL = 24 * 60 * 60
 
 
 def notification_payload(
@@ -88,6 +95,7 @@ class PromptSession:
     target: AndroidTarget
     tag: str | None
     actions_by_token: dict[str, str]
+    created_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +122,7 @@ class AcknowledgementSession:
     stop_event: asyncio.Event
     task: asyncio.Task[None] | None = None
     attempts_sent: int = 0
+    created_at: float = 0
 
     @property
     def key(self) -> tuple[str, str]:
@@ -121,16 +130,47 @@ class AcknowledgementSession:
         return (self.target.device_id, self.options.tag)
 
 
+@dataclass(frozen=True, slots=True)
+class StaleAcknowledgement:
+    """Minimal restart metadata for a notification that is being reconciled."""
+
+    target: AndroidTarget
+    session_id: str
+    action_token: str
+    tag: str
+    attempts_sent: int
+    created_at: float
+
+
 class NotificationManager:
     """Own one Companion action listener and all friendly notification state."""
 
-    def __init__(self, hass: HomeAssistant, send: SendNotification) -> None:
-        """Initialize intentionally ephemeral notification state."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        send: SendNotification,
+        store: Store[dict[str, Any]] | None = None,
+    ) -> None:
+        """Initialize bounded runtime and persisted action state."""
         self.hass = hass
         self._send = send
+        self._store = (
+            store
+            if store is not None
+            else (
+                Store(hass, STORE_VERSION, STORE_KEY)
+                if hasattr(hass, "config")
+                else None
+            )
+        )
+        self._loaded = self._store is None
+        self._load_lock = asyncio.Lock()
         self.prompts: OrderedDict[str, PromptSession] = OrderedDict()
         self.acknowledgements: dict[tuple[str, str], AcknowledgementSession] = {}
+        self.stale_acknowledgements: dict[str, StaleAcknowledgement] = {}
+        self._ack_start_lock = asyncio.Lock()
         self._unsubscribers: list[Callable[[], None]] = []
+        self._restore_task: asyncio.Task[None] | None = None
 
     def async_register(self) -> None:
         """Register shared listeners once."""
@@ -148,6 +188,120 @@ class NotificationManager:
                 self._async_handle_hass_stop,
             )
         )
+        if self._store is not None:
+            self._restore_task = self.hass.async_create_task(
+                self._async_ensure_loaded(),
+                f"{DOMAIN} restore notification sessions",
+            )
+
+    async def _async_ensure_loaded(self) -> None:
+        """Restore bounded metadata once and reconcile managed notifications."""
+        if self._loaded:
+            return
+        async with self._load_lock:
+            if self._loaded:
+                return
+            raw: dict[str, Any] | None = None
+            try:
+                raw = (
+                    await self._store.async_load() if self._store is not None else None
+                )
+            except Exception:  # noqa: BLE001 - storage must not block startup
+                _LOGGER.warning(
+                    "Could not load notification session metadata", exc_info=True
+                )
+            self._loaded = True
+            if isinstance(raw, dict):
+                self._restore(raw)
+            await self._async_reconcile_stale_acknowledgements()
+            await self._async_save()
+
+    def _restore(self, raw: dict[str, Any]) -> None:
+        """Validate and restore only minimal, unexpired session metadata."""
+        cutoff = time.time() - SESSION_TTL
+        prompt_items = raw.get("prompts", [])
+        for item in prompt_items if isinstance(prompt_items, list) else []:
+            try:
+                session = PromptSession(
+                    session_id=item["session_id"],
+                    target=_target_from_dict(item["target"]),
+                    tag=item.get("tag"),
+                    actions_by_token=dict(item["actions_by_token"]),
+                    created_at=float(item["created_at"]),
+                )
+                if (
+                    session.created_at >= cutoff
+                    and session.session_id
+                    and session.actions_by_token
+                    and all(
+                        isinstance(token, str)
+                        and token.startswith(NOTIFICATION_ACTION_PREFIX)
+                        and isinstance(action_id, str)
+                        for token, action_id in session.actions_by_token.items()
+                    )
+                ):
+                    self.prompts[session.session_id] = session
+            except (KeyError, TypeError, ValueError):
+                continue
+        while len(self.prompts) > MAX_PROMPT_SESSIONS:
+            self.prompts.popitem(last=False)
+
+        ack_items = raw.get("acknowledgements", [])
+        for item in ack_items if isinstance(ack_items, list) else []:
+            try:
+                stale = StaleAcknowledgement(
+                    target=_target_from_dict(item["target"]),
+                    session_id=item["session_id"],
+                    action_token=item["action_token"],
+                    tag=item["tag"],
+                    attempts_sent=int(item["attempts_sent"]),
+                    created_at=float(item["created_at"]),
+                )
+                if (
+                    stale.created_at >= cutoff
+                    and stale.session_id
+                    and stale.tag
+                    and stale.action_token.startswith(ACK_NOTIFICATION_ACTION_PREFIX)
+                ):
+                    self.stale_acknowledgements[stale.action_token] = stale
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        while len(self.stale_acknowledgements) > MAX_PERSISTED_ACKNOWLEDGEMENTS:
+            self.stale_acknowledgements.pop(next(iter(self.stale_acknowledgements)))
+
+    async def _async_reconcile_stale_acknowledgements(self) -> None:
+        """Best-effort clear notifications whose repeating tasks ended at restart."""
+        await asyncio.gather(
+            *(
+                self._clear(stale.target, stale.tag)
+                for stale in self.stale_acknowledgements.values()
+            )
+        )
+
+    async def _async_save(self) -> None:
+        """Persist the bounded metadata needed to recognize existing actions."""
+        if self._store is None or not self._loaded:
+            return
+        acknowledgements = (
+            [_ack_to_dict(session) for session in self.acknowledgements.values()]
+            + [
+                _stale_ack_to_dict(stale)
+                for stale in self.stale_acknowledgements.values()
+            ]
+        )[-MAX_PERSISTED_ACKNOWLEDGEMENTS:]
+        try:
+            await self._store.async_save(
+                {
+                    "prompts": [
+                        _prompt_to_dict(item) for item in self.prompts.values()
+                    ],
+                    "acknowledgements": acknowledgements,
+                }
+            )
+        except Exception:  # noqa: BLE001 - dispatch already succeeded
+            _LOGGER.warning(
+                "Could not save notification session metadata", exc_info=True
+            )
 
     async def async_prompt(
         self,
@@ -159,11 +313,12 @@ class NotificationManager:
         actions: list[dict[str, str]],
     ) -> PromptSession:
         """Send one isolated actionable notification."""
+        await self._async_ensure_loaded()
         session_id = uuid4().hex
         actions_by_token = {
             f"{NOTIFICATION_ACTION_PREFIX}{uuid4().hex}": item["id"] for item in actions
         }
-        session = PromptSession(session_id, target, tag, actions_by_token)
+        session = PromptSession(session_id, target, tag, actions_by_token, time.time())
         self.prompts[session_id] = session
         while len(self.prompts) > MAX_PROMPT_SESSIONS:
             self.prompts.popitem(last=False)
@@ -182,7 +337,9 @@ class NotificationManager:
             )
         except Exception:
             self.prompts.pop(session_id, None)
+            await self._async_save()
             raise
+        await self._async_save()
         return session
 
     async def async_start_acknowledgement(
@@ -190,45 +347,57 @@ class NotificationManager:
         target: AndroidTarget,
         options: AcknowledgementOptions,
     ) -> AcknowledgementSession:
-        """Replace the same device/tag session and dispatch immediately."""
+        """Dispatch a replacement before retiring the prior working session."""
+        await self._async_ensure_loaded()
         key = (target.device_id, options.tag)
-        if old := self.acknowledgements.get(key):
-            await self._async_stop_acknowledgement(old, clear=True)
-        session_id = uuid4().hex
-        session = AcknowledgementSession(
-            target=target,
-            session_id=session_id,
-            action_token=f"{ACK_NOTIFICATION_ACTION_PREFIX}{uuid4().hex}",
-            options=options,
-            stop_event=asyncio.Event(),
-        )
-        self.acknowledgements[key] = session
-        try:
+        async with self._ack_start_lock:
+            old = self.acknowledgements.get(key)
+            session = AcknowledgementSession(
+                target=target,
+                session_id=uuid4().hex,
+                action_token=f"{ACK_NOTIFICATION_ACTION_PREFIX}{uuid4().hex}",
+                options=options,
+                stop_event=asyncio.Event(),
+                created_at=time.time(),
+            )
+            # Sending to the same Companion tag atomically replaces the phone-side
+            # notification. Do not clear the tag while retiring the old task.
             await self._send_acknowledgement_attempt(session)
-        except Exception:
-            self._remove_acknowledgement_if_current(session)
-            raise
-        session.attempts_sent = 1
-        if options.max_attempts > 1:
+            session.attempts_sent = 1
+            if old is not None:
+                await self._async_stop_acknowledgement(old, clear=False, save=False)
+            self.acknowledgements[key] = session
             session.task = self.hass.async_create_task(
                 self._async_repeat_acknowledgement(session),
                 f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
             )
-        else:
-            self._remove_acknowledgement_if_current(session)
+            await self._async_save()
         return session
 
     async def async_stop_acknowledgement(self, target: AndroidTarget, tag: str) -> bool:
         """Stop a known session and always request best-effort tag clearing."""
+        await self._async_ensure_loaded()
         session = self.acknowledgements.get((target.device_id, tag))
         if session is not None:
             await self._async_stop_acknowledgement(session, clear=True)
             return True
+        self.stale_acknowledgements = {
+            token: stale
+            for token, stale in self.stale_acknowledgements.items()
+            if (stale.target.device_id, stale.tag) != (target.device_id, tag)
+        }
         await self._clear(target, tag)
+        await self._async_save()
         return False
 
     async def async_shutdown(self) -> None:
         """Cancel tasks and listeners without network cleanup."""
+        if (
+            self._restore_task is not None
+            and self._restore_task is not asyncio.current_task()
+            and not self._restore_task.done()
+        ):
+            await asyncio.gather(self._restore_task, return_exceptions=True)
         sessions = list(self.acknowledgements.values())
         for session in sessions:
             session.stop_event.set()
@@ -239,12 +408,14 @@ class NotificationManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.acknowledgements.clear()
         self.prompts.clear()
+        self.stale_acknowledgements.clear()
         while self._unsubscribers:
             self._unsubscribers.pop()()
 
     async def _async_repeat_acknowledgement(
         self, session: AcknowledgementSession
     ) -> None:
+        cleanup = False
         try:
             while session.attempts_sent < session.options.max_attempts:
                 try:
@@ -260,15 +431,26 @@ class NotificationManager:
                     break
                 try:
                     await self._send_acknowledgement_attempt(session)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - later attempts remain useful
                     _LOGGER.warning(
                         "Managed notification attempt failed for %s",
                         session.target.device_name,
                         exc_info=True,
                     )
                 session.attempts_sent += 1
+                await self._async_save()
+            if not session.stop_event.is_set():
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        session.stop_event.wait(),
+                        timeout=session.options.repeat_interval,
+                    )
+            cleanup = not session.stop_event.is_set()
         finally:
-            self._remove_acknowledgement_if_current(session)
+            if cleanup and not session.stop_event.is_set():
+                await self._clear(session.target, session.options.tag)
+                self._remove_acknowledgement_if_current(session)
+                await self._async_save()
 
     async def _send_acknowledgement_attempt(
         self, session: AcknowledgementSession
@@ -297,6 +479,7 @@ class NotificationManager:
         )
 
     async def _async_handle_action(self, event: Event) -> None:
+        await self._async_ensure_loaded()
         action = event.data.get("action")
         if not isinstance(action, str):
             return
@@ -319,6 +502,7 @@ class NotificationManager:
             return
         session_id, session, action_id = match
         self.prompts.pop(session_id, None)
+        await self._async_save()
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACTION,
             {
@@ -339,6 +523,20 @@ class NotificationManager:
             None,
         )
         if session is None:
+            stale = self.stale_acknowledgements.pop(token, None)
+            if stale is None:
+                return
+            await self._async_save()
+            self.hass.bus.async_fire(
+                EVENT_NOTIFICATION_ACKNOWLEDGED,
+                {
+                    "device_id": stale.target.device_id,
+                    "session_id": stale.session_id,
+                    "tag": stale.tag,
+                    "attempts": stale.attempts_sent,
+                    "reconciled_after_restart": True,
+                },
+            )
             return
         await self._async_stop_acknowledgement(session, clear=True)
         self.hass.bus.async_fire(
@@ -352,7 +550,11 @@ class NotificationManager:
         )
 
     async def _async_stop_acknowledgement(
-        self, session: AcknowledgementSession, *, clear: bool
+        self,
+        session: AcknowledgementSession,
+        *,
+        clear: bool,
+        save: bool = True,
     ) -> None:
         session.stop_event.set()
         if session.task is not None and session.task is not asyncio.current_task():
@@ -360,11 +562,13 @@ class NotificationManager:
         self._remove_acknowledgement_if_current(session)
         if clear:
             await self._clear(session.target, session.options.tag)
+        if save:
+            await self._async_save()
 
     async def _clear(self, target: AndroidTarget, tag: str) -> None:
         try:
             await self._send(target, payload("clear_notification", {"tag": tag}))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - best-effort reconciliation
             _LOGGER.warning(
                 "Could not clear managed notification for %s",
                 target.device_name,
@@ -379,6 +583,59 @@ class NotificationManager:
     ) -> None:
         if self.acknowledgements.get(session.key) is session:
             self.acknowledgements.pop(session.key, None)
+
+
+def _target_to_dict(target: AndroidTarget) -> dict[str, str]:
+    """Serialize the stable routing fields needed for restart reconciliation."""
+    return {
+        "device_id": target.device_id,
+        "device_name": target.device_name,
+        "webhook_id": target.webhook_id,
+        "notify_service": target.notify_service,
+    }
+
+
+def _target_from_dict(data: dict[str, Any]) -> AndroidTarget:
+    """Validate a persisted Android target."""
+    values = {
+        key: data[key]
+        for key in ("device_id", "device_name", "webhook_id", "notify_service")
+    }
+    if not all(isinstance(value, str) and value for value in values.values()):
+        raise ValueError("Invalid persisted Android target")
+    return AndroidTarget(**values)
+
+
+def _prompt_to_dict(session: PromptSession) -> dict[str, Any]:
+    return {
+        "session_id": session.session_id,
+        "target": _target_to_dict(session.target),
+        "tag": session.tag,
+        "actions_by_token": session.actions_by_token,
+        "created_at": session.created_at,
+    }
+
+
+def _ack_to_dict(session: AcknowledgementSession) -> dict[str, Any]:
+    return {
+        "target": _target_to_dict(session.target),
+        "session_id": session.session_id,
+        "action_token": session.action_token,
+        "tag": session.options.tag,
+        "attempts_sent": session.attempts_sent,
+        "created_at": session.created_at,
+    }
+
+
+def _stale_ack_to_dict(stale: StaleAcknowledgement) -> dict[str, Any]:
+    return {
+        "target": _target_to_dict(stale.target),
+        "session_id": stale.session_id,
+        "action_token": stale.action_token,
+        "tag": stale.tag,
+        "attempts_sent": stale.attempts_sent,
+        "created_at": stale.created_at,
+    }
 
 
 def get_notification_manager(

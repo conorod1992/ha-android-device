@@ -92,6 +92,36 @@ def test_rejects_missing_notify_action(hass: SimpleNamespace) -> None:
         device_module.resolve_android_target(hass, "phone")
 
 
+@pytest.mark.parametrize("mobile_data", [None, {}, {DATA_CONFIG_ENTRIES: None}])
+def test_missing_mobile_app_runtime_state_is_controlled(
+    hass: SimpleNamespace, mobile_data
+) -> None:
+    if mobile_data is None:
+        hass.data.pop(MOBILE_APP_DOMAIN)
+    else:
+        hass.data[MOBILE_APP_DOMAIN] = mobile_data
+
+    with pytest.raises(ServiceValidationError) as error:
+        device_module.resolve_android_target(hass, "phone")
+
+    assert error.value.translation_key == "mobile_app_unavailable"
+
+
+def test_missing_mobile_app_compatibility_helper_is_controlled(
+    hass: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        device_module,
+        "webhook_id_from_device_id",
+        lambda *_args: (_ for _ in ()).throw(ImportError("helper moved")),
+    )
+
+    with pytest.raises(ServiceValidationError) as error:
+        device_module.resolve_android_target(hass, "phone")
+
+    assert error.value.translation_key == "mobile_app_unavailable"
+
+
 def test_deduplicates_multiple_devices(
     hass: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

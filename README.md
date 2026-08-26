@@ -369,7 +369,7 @@ data:
   tag: freezer-door
 ```
 
-Repeating-notification sessions are stored in memory only. Restarting Home Assistant or unloading the integration stops future repeats.
+Repeating tasks are not resumed after a restart. Instead, the integration stores only bounded session identifiers and routing metadata, then clears stale managed notifications at startup. A late acknowledgement button remains recognizable for up to 24 hours. Prompt/yes-no/choice button mappings use the same 24-hour lifetime; notification titles and messages are not stored.
 
 ## Find phone
 
@@ -448,6 +448,7 @@ For the quickest unlock detection, configure Android's `USER_PRESENT` broadcast 
 If you do not configure this, Find Phone still works. The integration can use the Companion App's **Keyguard Locked** sensor as a fallback when available, and the **Stop ringing** button is always available.
 
 Find Phone sessions are held in memory. A Home Assistant restart stops future attempts.
+Natural attempt exhaustion clears the integration notification. Cleanup stops Companion TTS only for a known TTS-mode session. Because Companion does not report whether the flashlight was already on, Find Phone never turns it off automatically; use `turn_off_flashlight: true` with `stop_find_phone` only when that explicit state change is wanted.
 
 ## Open, share and send things to your phone
 
@@ -816,7 +817,7 @@ The integration resolves the selected Home Assistant device through the Mobile A
 
 This avoids relying on name matching and helps prevent accidentally targeting a different device with a similar name.
 
-For multi-device actions, targets are validated before commands are sent. After validation, sends run independently, so one later failure does not undo commands already delivered to another target.
+For multi-device actions, each target is resolved and sent independently. A stale or failing target does not block valid devices, and the action raises only when every selected target is invalid or fails to dispatch. Notification actions that support responses include per-device status.
 
 ### Brightness
 

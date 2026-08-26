@@ -225,17 +225,61 @@ async def _async_send(
     )
 
 
+def _resolve_targets_independently(
+    hass: HomeAssistant, device_ids: list[str]
+) -> tuple[list[AndroidTarget], list[dict[str, Any]]]:
+    """Resolve each selected device without one stale target blocking the rest."""
+    targets: list[AndroidTarget] = []
+    failures: list[dict[str, Any]] = []
+    for device_id in dict.fromkeys(device_ids):
+        try:
+            resolved = resolve_android_targets(hass, [device_id])
+            target = next(
+                (item for item in resolved if item.device_id == device_id), None
+            )
+            if target is None:
+                failures.append(
+                    {
+                        "device_id": device_id,
+                        "device_name": device_id,
+                        "dispatched": False,
+                        "error": f"Could not resolve {device_id}",
+                    }
+                )
+                continue
+            targets.append(target)
+        except HomeAssistantError as err:
+            failures.append(
+                {
+                    "device_id": device_id,
+                    "device_name": device_id,
+                    "dispatched": False,
+                    "error": str(err),
+                }
+            )
+    if not targets:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={
+                "devices": ", ".join(item["device_name"] for item in failures)
+            },
+        )
+    return targets, failures
+
+
 async def _async_dispatch_with_response(
     hass: HomeAssistant,
     targets: list[AndroidTarget],
     notify_payload: dict[str, Any],
+    resolution_failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Dispatch to every target and describe dispatch, never device execution."""
     results = await asyncio.gather(
         *(_async_send(hass, target, notify_payload) for target in targets),
         return_exceptions=True,
     )
-    response = []
+    response = list(resolution_failures or [])
     for target, result in zip(targets, results, strict=True):
         item: dict[str, Any] = {
             "device_id": target.device_id,
@@ -259,17 +303,22 @@ async def _async_dispatch_with_response(
 async def _async_notification(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Send a curated normal or urgent notification."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, resolution_failures = _resolve_targets_independently(
+        hass, data.pop(ATTR_DEVICE_ID)
+    )
     urgent = call.service == SERVICE_NOTIFY_URGENT
     return await _async_dispatch_with_response(
-        hass, targets, notification_payload(data, urgent=urgent)
+        hass,
+        targets,
+        notification_payload(data, urgent=urgent),
+        resolution_failures,
     )
 
 
 async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Send independent prompts and return their opaque session IDs."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, devices = _resolve_targets_independently(hass, data.pop(ATTR_DEVICE_ID))
     if call.service == SERVICE_ASK_YES_NO:
         actions = [
             {"id": "yes", "title": data["yes_label"]},
@@ -291,7 +340,6 @@ async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any
         ),
         return_exceptions=True,
     )
-    devices = []
     for target, result in zip(targets, results, strict=True):
         item: dict[str, Any] = {
             "device_id": target.device_id,
@@ -319,7 +367,7 @@ async def _async_notify_until_acknowledged(
 ) -> dict[str, Any]:
     """Start one bounded managed session per selected Android device."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, devices = _resolve_targets_independently(hass, data.pop(ATTR_DEVICE_ID))
     options = AcknowledgementOptions(
         title=data["title"],
         message=data["message"],
@@ -334,7 +382,6 @@ async def _async_notify_until_acknowledged(
         *(manager.async_start_acknowledgement(target, options) for target in targets),
         return_exceptions=True,
     )
-    devices = []
     for target, result in zip(targets, results, strict=True):
         item: dict[str, Any] = {
             "device_id": target.device_id,
@@ -362,13 +409,16 @@ async def _async_stop_notify_until_acknowledged(
 ) -> dict[str, Any]:
     """Stop selected managed sessions with restart-safe tag clearing."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, resolution_failures = _resolve_targets_independently(
+        hass, data.pop(ATTR_DEVICE_ID)
+    )
     manager = get_notification_manager(hass, partial(_async_send, hass))
     stopped = await asyncio.gather(
         *(manager.async_stop_acknowledgement(target, data["tag"]) for target in targets)
     )
     return {
-        "devices": [
+        "devices": resolution_failures
+        + [
             {
                 "device_id": target.device_id,
                 "device_name": target.device_name,
@@ -386,7 +436,7 @@ async def _async_handle(
     """Validate all devices, build once, and dispatch independently."""
     data = dict(call.data)
     device_ids = data.pop(ATTR_DEVICE_ID)
-    targets = resolve_android_targets(hass, device_ids)
+    targets, _resolution_failures = _resolve_targets_independently(hass, device_ids)
     try:
         notify_payload = builder(data)
     except vol.Invalid as err:
@@ -401,7 +451,7 @@ async def _async_handle(
         for target, result in zip(targets, results, strict=True)
         if isinstance(result, BaseException)
     ]
-    if failures:
+    if len(failures) == len(targets):
         _LOGGER.warning(
             "Android command %s failed for %s",
             notify_payload["message"],
@@ -419,18 +469,24 @@ async def _async_handle_with_response(
 ) -> dict[str, Any]:
     """Build a friendly command and return dispatch-only response data."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, resolution_failures = _resolve_targets_independently(
+        hass, data.pop(ATTR_DEVICE_ID)
+    )
     try:
         notify_payload = builder(data)
     except vol.Invalid as err:
         raise ServiceValidationError(str(err)) from err
-    return await _async_dispatch_with_response(hass, targets, notify_payload)
+    return await _async_dispatch_with_response(
+        hass, targets, notify_payload, resolution_failures
+    )
 
 
 async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
     """Start independent, bounded Find Phone sessions for selected devices."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, _resolution_failures = _resolve_targets_independently(
+        hass, data.pop(ATTR_DEVICE_ID)
+    )
     options = FindPhoneOptions(
         wake_screen=data["wake_screen"],
         flashlight=data["flashlight"],
@@ -452,7 +508,7 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
         for target, result in zip(targets, results, strict=True)
         if isinstance(result, BaseException)
     ]
-    if failures:
+    if len(failures) == len(targets):
         _LOGGER.warning("Find Phone could not start for %s", ", ".join(failures))
         raise HomeAssistantError(
             translation_domain=DOMAIN,
@@ -464,7 +520,9 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
 async def _async_stop_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
     """Stop selected sessions and perform best-effort phone-side cleanup."""
     data = dict(call.data)
-    targets = resolve_android_targets(hass, data.pop(ATTR_DEVICE_ID))
+    targets, _resolution_failures = _resolve_targets_independently(
+        hass, data.pop(ATTR_DEVICE_ID)
+    )
     manager = get_find_phone_manager(hass, partial(_async_send, hass))
     await asyncio.gather(
         *(

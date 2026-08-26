@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.android_device_control import find_phone as find_phone_module
 from custom_components.android_device_control.const import (
@@ -102,6 +103,7 @@ async def test_first_attempt_is_ordered_and_later_attempts_send_sound_only(
         "Finding phone",
         "Finding phone",
         "Finding phone",
+        "clear_notification",
     ]
     assert session.attempts_sent == 3
     assert manager.sessions == {}
@@ -116,7 +118,11 @@ async def test_ringtone_payload_and_action_metadata_are_stable(
 
     session = await manager.async_start(phone, options(wake_screen=False))
     await session.task
-    sounds = [command for _, command in recorder.calls]
+    sounds = [
+        command
+        for _, command in recorder.calls
+        if command["message"] == "Finding phone"
+    ]
 
     assert len(sounds) == 3
     assert all(sound["data"]["ttl"] == 0 for sound in sounds)
@@ -154,6 +160,12 @@ async def test_tts_uses_maximum_alarm_and_optional_control_notification(
     }
     assert recorder.calls[0][1]["data"]["actions"][0]["title"] == "Stop ringing"
 
+    cleanup_start = len(recorder.calls)
+    await manager.async_stop(phone)
+    assert [command["message"] for _, command in recorder.calls[cleanup_start:]] == [
+        "command_stop_tts",
+        "clear_notification",
+    ]
     recorder.calls.clear()
     await manager.async_start(
         phone,
@@ -165,6 +177,7 @@ async def test_tts_uses_maximum_alarm_and_optional_control_notification(
         ),
     )
     assert [command["message"] for _, command in recorder.calls] == ["TTS"]
+    await manager.async_shutdown()
 
 
 async def test_stop_interrupts_wait_and_cleans_known_flashlight(
@@ -180,12 +193,11 @@ async def test_stop_interrupts_wait_and_cleans_known_flashlight(
     assert session.task.done()
     assert session.attempts_sent == 1
     assert manager.sessions == {}
-    assert [command["message"] for _, command in recorder.calls[-3:]] == [
-        "command_stop_tts",
-        "clear_notification",
-        "command_flashlight",
-    ]
-    assert recorder.calls[-1][1]["data"]["command"] == "turn_off"
+    assert recorder.calls[-1][1]["message"] == "clear_notification"
+    assert not any(
+        command["message"] in {"command_stop_tts", "command_flashlight"}
+        for _, command in recorder.calls[3:]
+    )
 
 
 async def test_start_replaces_only_same_device(phone: AndroidTarget) -> None:
@@ -197,7 +209,8 @@ async def test_start_replaces_only_same_device(phone: AndroidTarget) -> None:
     assert first.stop_event.is_set()
     assert first.task.done()
     assert first.session_id != second.session_id
-    assert manager.sessions == {}
+    assert manager.sessions == {phone.device_id: second}
+    await manager.async_shutdown()
 
 
 def test_old_session_cannot_remove_newer_session(phone: AndroidTarget) -> None:
@@ -248,11 +261,11 @@ async def test_transient_failure_does_not_end_future_attempts(
     manager = FindPhoneManager(FakeHass(), recorder.send)
     monkeypatch.setattr(find_phone_module.asyncio, "wait_for", instant_timeout)
 
-    session = await manager.async_start(phone, options(wake_screen=False))
+    session = await manager.async_start(phone, options(wake_screen=True))
     await session.task
 
     assert session.attempts_sent == 3
-    assert len(recorder.calls) == 3
+    assert len(recorder.calls) == 5
     assert manager.sessions == {}
 
 
@@ -282,9 +295,40 @@ async def test_matching_notification_action_stops_correct_session(
     assert session.attempts_sent == 1
     assert manager.sessions == {}
     assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
-        "command_stop_tts",
         "clear_notification",
     ]
+
+
+async def test_initial_total_failure_raises_and_leaves_no_session(
+    phone: AndroidTarget,
+) -> None:
+    async def fail(_target, _command) -> None:
+        raise RuntimeError("offline")
+
+    manager = FindPhoneManager(FakeHass(), fail)
+
+    with pytest.raises(HomeAssistantError):
+        await manager.async_start(phone, options(wake_screen=False, repeat=False))
+
+    assert manager.sessions == {}
+
+
+async def test_initial_optional_failure_still_starts_when_sound_dispatches(
+    phone: AndroidTarget,
+) -> None:
+    calls = []
+
+    async def fail_wake_only(_target, command) -> None:
+        calls.append(command["message"])
+        if command["message"] == "command_screen_on":
+            raise RuntimeError("wake unavailable")
+
+    manager = FindPhoneManager(FakeHass(), fail_wake_only)
+    session = await manager.async_start(phone, options(repeat=False))
+
+    assert calls == ["command_screen_on", "Finding phone"]
+    assert manager.sessions[phone.device_id] is session
+    await manager.async_shutdown()
 
 
 async def test_exact_action_stops_only_matching_session(
@@ -434,9 +478,13 @@ async def test_action_after_restart_performs_conservative_device_cleanup(
     )
 
     assert [command["message"] for _, command in recorder.calls] == [
-        "command_stop_tts",
+        "clear_notification",
         "clear_notification",
     ]
+    assert {command["data"]["tag"] for _, command in recorder.calls} == {
+        FIND_PHONE_NOTIFICATION_TAG,
+        "find_phone",
+    }
 
 
 async def test_shutdown_cancels_tasks_clears_sessions_and_listeners(
@@ -481,12 +529,15 @@ async def test_one_device_dispatch_failure_does_not_block_another(
         successful_targets.append(target.device_id)
 
     manager = FindPhoneManager(FakeHass(), send)
-    await asyncio.gather(
+    results = await asyncio.gather(
         manager.async_start(phone, options(repeat=False)),
         manager.async_start(tablet, options(repeat=False)),
+        return_exceptions=True,
     )
 
+    assert isinstance(results[0], HomeAssistantError)
     assert successful_targets == ["tablet", "tablet"]
+    await manager.async_shutdown()
 
 
 def add_registration(hass, target, registration_device_id):
@@ -521,8 +572,7 @@ async def test_user_present_for_target_device_stops_active_session(
 
     assert session.stop_event.is_set()
     assert manager.sessions == {}
-    assert [command["message"] for _, command in recorder.calls[-2:]] == [
-        "command_stop_tts",
+    assert [command["message"] for _, command in recorder.calls[-1:]] == [
         "clear_notification",
     ]
 
@@ -708,7 +758,6 @@ async def test_simultaneous_unlock_signals_cleanup_once(phone: AndroidTarget) ->
     )
 
     assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
-        "command_stop_tts",
         "clear_notification",
     ]
 
@@ -741,7 +790,6 @@ async def test_notification_stop_and_unlock_cleanup_once(
     )
 
     assert [command["message"] for _, command in recorder.calls[initial_count:]] == [
-        "command_stop_tts",
         "clear_notification",
     ]
 

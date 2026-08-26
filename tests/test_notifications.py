@@ -54,6 +54,17 @@ class Recorder:
         self.calls.append((target, notification))
 
 
+class FakeStore:
+    def __init__(self, data=None) -> None:
+        self.data = data
+
+    async def async_load(self):
+        return self.data
+
+    async def async_save(self, data) -> None:
+        self.data = data
+
+
 @pytest.fixture
 def phone() -> AndroidTarget:
     return AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
@@ -188,9 +199,10 @@ async def test_acknowledgement_repeats_immediately_then_stops_at_maximum(
     await session.task
 
     assert session.attempts_sent == 3
-    assert len(recorder.calls) == 3
+    assert len(recorder.calls) == 4
     assert manager.acknowledgements == {}
-    assert all(call[1]["data"]["ttl"] == 0 for call in recorder.calls)
+    assert all(call[1]["data"]["ttl"] == 0 for call in recorder.calls[:3])
+    assert recorder.calls[-1][1]["message"] == "clear_notification"
 
 
 async def test_acknowledgement_action_cancels_and_clears(phone: AndroidTarget) -> None:
@@ -269,3 +281,111 @@ async def test_shutdown_cancels_tasks_sessions_prompts_and_listeners(
     assert manager.acknowledgements == {}
     assert manager.prompts == {}
     assert hass.bus.listeners == []
+
+
+async def test_prompt_action_mapping_survives_restart(phone: AndroidTarget) -> None:
+    store = FakeStore()
+    first = NotificationManager(FakeHass(), Recorder().send, store)
+    prompt = await first.async_prompt(
+        phone,
+        title="Question",
+        message="Continue?",
+        tag="question",
+        actions=[{"id": "yes", "title": "Yes"}],
+    )
+    token = next(iter(prompt.actions_by_token))
+    await first.async_shutdown()
+
+    hass = FakeHass()
+    restarted = NotificationManager(hass, Recorder().send, store)
+    await restarted._async_handle_action(SimpleNamespace(data={"action": token}))
+
+    assert hass.bus.fired[-1] == (
+        EVENT_NOTIFICATION_ACTION,
+        {
+            "device_id": phone.device_id,
+            "session_id": prompt.session_id,
+            "action_id": "yes",
+            "tag": "question",
+        },
+    )
+
+
+async def test_stale_and_malformed_persisted_prompts_are_pruned(
+    phone: AndroidTarget,
+) -> None:
+    store = FakeStore(
+        {
+            "prompts": [
+                {
+                    "session_id": "expired",
+                    "target": module._target_to_dict(phone),
+                    "tag": None,
+                    "actions_by_token": {"ANDROID_DEVICE_CONTROL_ACTION_old": "yes"},
+                    "created_at": 0,
+                },
+                {"malformed": True},
+            ],
+            "acknowledgements": "invalid",
+        }
+    )
+    manager = NotificationManager(FakeHass(), Recorder().send, store)
+
+    await manager._async_ensure_loaded()
+
+    assert manager.prompts == {}
+    assert store.data == {"prompts": [], "acknowledgements": []}
+
+
+async def test_acknowledgement_restart_clears_and_recognizes_late_action(
+    phone: AndroidTarget,
+) -> None:
+    store = FakeStore()
+    first = NotificationManager(FakeHass(), Recorder().send, store)
+    session = await first.async_start_acknowledgement(phone, ack_options())
+    await first.async_shutdown()
+
+    hass = FakeHass()
+    recorder = Recorder()
+    restarted = NotificationManager(hass, recorder.send, store)
+    await restarted._async_ensure_loaded()
+    await restarted._async_handle_action(
+        SimpleNamespace(data={"action": session.action_token})
+    )
+
+    assert recorder.calls[-1][1]["message"] == "clear_notification"
+    assert hass.bus.fired[-1][1]["reconciled_after_restart"] is True
+
+
+async def test_failed_acknowledgement_replacement_preserves_old_session(
+    phone: AndroidTarget,
+) -> None:
+    recorder = Recorder()
+    manager = NotificationManager(FakeHass(), recorder.send)
+    old = await manager.async_start_acknowledgement(phone, ack_options())
+
+    async def fail_replacement(_target, _notification) -> None:
+        raise RuntimeError("push unavailable")
+
+    manager._send = fail_replacement
+    with pytest.raises(RuntimeError, match="push unavailable"):
+        await manager.async_start_acknowledgement(phone, ack_options(message="new"))
+
+    assert manager.acknowledgements[old.key] is old
+    assert not old.stop_event.is_set()
+    await manager.async_shutdown()
+
+
+async def test_concurrent_same_tag_replacements_leave_one_task(
+    phone: AndroidTarget,
+) -> None:
+    manager = NotificationManager(FakeHass(), Recorder().send)
+    first, second = await asyncio.gather(
+        manager.async_start_acknowledgement(phone, ack_options(message="first")),
+        manager.async_start_acknowledgement(phone, ack_options(message="second")),
+    )
+
+    current = manager.acknowledgements[first.key]
+    assert current is first or current is second
+    assert sum(not item.task.done() for item in (first, second)) == 1
+    await manager.async_shutdown()

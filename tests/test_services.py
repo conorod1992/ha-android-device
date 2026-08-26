@@ -604,6 +604,25 @@ async def test_all_targets_are_resolved_before_dispatch(
     assert hass.services.calls == []
 
 
+async def test_stale_target_does_not_block_valid_target(
+    monkeypatch: pytest.MonkeyPatch, hass: SimpleNamespace
+) -> None:
+    target = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
+
+    def resolve(_hass, ids):
+        if ids == ["stale"]:
+            raise HomeAssistantError("stale target")
+        return [target]
+
+    monkeypatch.setattr(services_module, "resolve_android_targets", resolve)
+
+    await hass.services.handlers["stop_tts"](
+        ServiceCall(hass, DOMAIN, "stop_tts", {"device_id": ["stale", "phone"]})
+    )
+
+    assert [call[2]["target"] for call in hass.services.calls] == [["webhook-phone"]]
+
+
 async def test_find_phone_defaults_to_immediate_ringtone_notification(
     hass: SimpleNamespace,
 ) -> None:
@@ -628,7 +647,7 @@ async def test_find_phone_defaults_to_immediate_ringtone_notification(
         "ttl": 0,
         "priority": "high",
         "channel": "alarm_stream",
-        "tag": "find_phone",
+        "tag": "android_device_control_find_phone",
     }
     assert ringtone["data"]["actions"][0]["title"] == "Stop ringing"
     assert "alert_once" not in ringtone["data"]
@@ -704,7 +723,9 @@ async def test_find_phone_stable_tag_still_alerts_each_call(
         call[2] for call in hass.services.calls if call[2]["message"] == "Finding phone"
     ]
     assert len(ringtone_calls) == 2
-    assert {call["data"]["tag"] for call in ringtone_calls} == {"find_phone"}
+    assert {call["data"]["tag"] for call in ringtone_calls} == {
+        "android_device_control_find_phone"
+    }
     assert all("alert_once" not in call["data"] for call in ringtone_calls)
 
 
@@ -791,10 +812,13 @@ async def test_stop_find_phone_without_session_is_conservative(
         ServiceCall(hass, DOMAIN, "stop_find_phone", validated)
     )
     assert [call[2]["message"] for call in hass.services.calls] == [
-        "command_stop_tts",
+        "clear_notification",
         "clear_notification",
     ]
-    assert hass.services.calls[-1][2]["data"]["tag"] == "find_phone"
+    assert {call[2]["data"]["tag"] for call in hass.services.calls} == {
+        "android_device_control_find_phone",
+        "find_phone",
+    }
 
 
 async def test_stop_find_phone_can_explicitly_clean_flashlight_after_restart(
@@ -807,7 +831,7 @@ async def test_stop_find_phone_can_explicitly_clean_flashlight_after_restart(
         ServiceCall(hass, DOMAIN, "stop_find_phone", validated)
     )
     assert [call[2]["message"] for call in hass.services.calls] == [
-        "command_stop_tts",
+        "clear_notification",
         "clear_notification",
         "command_flashlight",
     ]
@@ -822,9 +846,9 @@ async def test_stop_find_phone_is_idempotent(hass: SimpleNamespace) -> None:
     await hass.services.handlers["stop_find_phone"](call)
 
     assert [call[2]["message"] for call in hass.services.calls] == [
-        "command_stop_tts",
         "clear_notification",
-        "command_stop_tts",
+        "clear_notification",
+        "clear_notification",
         "clear_notification",
     ]
 
@@ -847,14 +871,17 @@ async def test_unregister_cancels_find_phone_and_removes_listeners_and_services(
     assert DOMAIN not in hass.data
 
 
-async def test_find_phone_transient_transport_failure_still_starts(
+async def test_find_phone_total_transport_failure_raises(
     hass: SimpleNamespace,
 ) -> None:
     hass.services.failure = HomeAssistantError("transport failed")
     validated = hass.services.schemas["find_phone"]({"device_id": "phone"})
-    await hass.services.handlers["find_phone"](
-        ServiceCall(hass, DOMAIN, "find_phone", validated)
-    )
+    with pytest.raises(HomeAssistantError):
+        await hass.services.handlers["find_phone"](
+            ServiceCall(hass, DOMAIN, "find_phone", validated)
+        )
+    manager = hass.data[DOMAIN][services_module.DATA_FIND_PHONE_MANAGER]
+    assert manager.sessions == {}
     assert [call[2]["message"] for call in hass.services.calls] == [
         "command_screen_on",
         "Finding phone",
