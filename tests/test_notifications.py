@@ -389,3 +389,53 @@ async def test_concurrent_same_tag_replacements_leave_one_task(
     assert current is first or current is second
     assert sum(not item.task.done() for item in (first, second)) == 1
     await manager.async_shutdown()
+
+
+async def test_old_repeat_cannot_overwrite_successful_replacement(
+    monkeypatch: pytest.MonkeyPatch, phone: AndroidTarget
+) -> None:
+    old_repeat_waiting = asyncio.Event()
+    release_old_repeat = asyncio.Event()
+    replacement_sent = asyncio.Event()
+    release_replacement_send = asyncio.Event()
+    original_wait_for = module.asyncio.wait_for
+    wait_calls = 0
+    sent_tokens = []
+
+    async def controlled_wait_for(awaitable, **kwargs):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            old_repeat_waiting.set()
+            await release_old_repeat.wait()
+            awaitable.close()
+            raise TimeoutError
+        return await original_wait_for(awaitable, **kwargs)
+
+    async def controlled_send(_target, notification) -> None:
+        token = notification["data"]["actions"][0]["action"]
+        sent_tokens.append(token)
+        if len(sent_tokens) == 2:
+            replacement_sent.set()
+            await release_replacement_send.wait()
+
+    monkeypatch.setattr(module.asyncio, "wait_for", controlled_wait_for)
+    manager = NotificationManager(FakeHass(), controlled_send)
+    old = await manager.async_start_acknowledgement(phone, ack_options())
+    await old_repeat_waiting.wait()
+
+    replacement_task = asyncio.create_task(
+        manager.async_start_acknowledgement(phone, ack_options(message="new"))
+    )
+    await replacement_sent.wait()
+    release_old_repeat.set()
+    await asyncio.sleep(0)
+    release_replacement_send.set()
+    replacement = await replacement_task
+
+    assert manager.acknowledgements[old.key] is replacement
+    assert old.task.done()
+    assert not replacement.task.done()
+    assert sent_tokens == [old.action_token, replacement.action_token]
+    assert sent_tokens[-1] == replacement.action_token
+    await manager.async_shutdown()

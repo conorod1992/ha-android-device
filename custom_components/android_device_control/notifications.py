@@ -350,6 +350,7 @@ class NotificationManager:
         """Dispatch a replacement before retiring the prior working session."""
         await self._async_ensure_loaded()
         key = (target.device_id, options.tag)
+        old: AcknowledgementSession | None = None
         async with self._ack_start_lock:
             old = self.acknowledgements.get(key)
             session = AcknowledgementSession(
@@ -365,13 +366,23 @@ class NotificationManager:
             await self._send_acknowledgement_attempt(session)
             session.attempts_sent = 1
             if old is not None:
-                await self._async_stop_acknowledgement(old, clear=False, save=False)
+                # A repeat waiting for this lock will observe the stop/current checks
+                # below and cannot overwrite the replacement after ownership moves.
+                old.stop_event.set()
             self.acknowledgements[key] = session
             session.task = self.hass.async_create_task(
                 self._async_repeat_acknowledgement(session),
                 f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
             )
             await self._async_save()
+        if (
+            old is not None
+            and old.task is not None
+            and old.task is not asyncio.current_task()
+        ):
+            # Do not wait while holding _ack_start_lock: the old repeat may be
+            # queued on that lock so it can verify that it no longer owns the tag.
+            await asyncio.gather(old.task, return_exceptions=True)
         return session
 
     async def async_stop_acknowledgement(self, target: AndroidTarget, tag: str) -> bool:
@@ -429,14 +440,19 @@ class NotificationManager:
                     break
                 if session.stop_event.is_set():
                     break
-                try:
-                    await self._send_acknowledgement_attempt(session)
-                except Exception:  # noqa: BLE001 - later attempts remain useful
-                    _LOGGER.warning(
-                        "Managed notification attempt failed for %s",
-                        session.target.device_name,
-                        exc_info=True,
-                    )
+                async with self._ack_start_lock:
+                    if self.acknowledgements.get(session.key) is not session:
+                        return
+                    if session.stop_event.is_set():
+                        return
+                    try:
+                        await self._send_acknowledgement_attempt(session)
+                    except Exception:  # noqa: BLE001 - later attempts remain useful
+                        _LOGGER.warning(
+                            "Managed notification attempt failed for %s",
+                            session.target.device_name,
+                            exc_info=True,
+                        )
                 session.attempts_sent += 1
                 await self._async_save()
             if not session.stop_event.is_set():
