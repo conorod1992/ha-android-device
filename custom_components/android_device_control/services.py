@@ -85,6 +85,7 @@ PayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 PACKAGE_ID_PATTERN = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$"
 )
+LIVE_UPDATE_TAG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_ACTION_LABEL_LENGTH = 80
 
 
@@ -107,6 +108,16 @@ def _non_empty(value: Any) -> str:
     result = cv.string(value).strip()
     if not result:
         raise vol.Invalid("Value must not be empty")
+    return result
+
+
+def _live_update_tag(value: Any) -> str:
+    """Validate Companion's strict Live Update replacement identifier."""
+    result = cv.string(value)
+    if LIVE_UPDATE_TAG_PATTERN.fullmatch(result) is None:
+        raise vol.Invalid(
+            "Live Update tag must be 1-64 letters, numbers, hyphens, or underscores"
+        )
     return result
 
 
@@ -339,6 +350,36 @@ async def _async_notification(hass: HomeAssistant, call: ServiceCall) -> dict[st
         if builder is not None
         else notification_payload(data, urgent=call.service == SERVICE_NOTIFY_URGENT)
     )
+    if data["confirm_delivery"]:
+        manager = get_notification_manager(hass, partial(_async_send, hass))
+        results = await asyncio.gather(
+            *(
+                manager.async_send_confirmed(target, notify_payload, data.get("tag"))
+                for target in targets
+            ),
+            return_exceptions=True,
+        )
+        devices = list(resolution_failures)
+        for target, result in zip(targets, results, strict=True):
+            item: dict[str, Any] = {
+                "device_id": target.device_id,
+                "device_name": target.device_name,
+                "dispatched": not isinstance(result, BaseException),
+            }
+            if isinstance(result, BaseException):
+                item["error"] = str(result)
+            else:
+                item["session_id"] = result.session_id
+            devices.append(item)
+        if not any(item["dispatched"] for item in devices):
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="dispatch_failed",
+                translation_placeholders={
+                    "devices": ", ".join(item["device_name"] for item in devices)
+                },
+            )
+        return {"devices": devices}
     return await _async_dispatch_with_response(
         hass,
         targets,
@@ -727,7 +768,7 @@ def _register_notification_services(hass: HomeAssistant) -> None:
     live_fields = presentation_fields | {
         vol.Required("title"): _non_empty,
         vol.Required("message"): _non_empty,
-        vol.Required("tag"): _non_empty,
+        vol.Required("tag"): _live_update_tag,
         vol.Optional("current"): vol.Coerce(int),
         vol.Optional("maximum"): vol.Coerce(int),
         vol.Optional("critical_text"): cv.string,

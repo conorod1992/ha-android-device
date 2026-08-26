@@ -122,6 +122,48 @@ async def test_normal_and_urgent_notification_services_return_dispatch_status(
     }
 
 
+async def test_multi_device_confirmation_dispatch_uses_unique_tokens(
+    monkeypatch: pytest.MonkeyPatch, hass: SimpleNamespace
+) -> None:
+    first = AndroidTarget("ha-one", "One", "webhook-one", "mobile_app_one")
+    second = AndroidTarget("ha-two", "Two", "webhook-two", "mobile_app_two")
+    monkeypatch.setattr(
+        services_module,
+        "resolve_android_targets",
+        lambda _hass, _ids: [first, second],
+    )
+    data = hass.services.schemas["notify"](
+        {"device_id": ["ha-one", "ha-two"], "message": "Test", "confirm_delivery": True}
+    )
+
+    response = await hass.services.handlers["notify"](
+        ServiceCall(hass, DOMAIN, "notify", data)
+    )
+
+    tokens = [
+        call[2]["data"]["android_device_control_session_id"]
+        for call in hass.services.calls
+    ]
+    assert len(set(tokens)) == 2
+    assert tokens == [item["session_id"] for item in response["devices"]]
+
+
+@pytest.mark.parametrize("tag", ["washer", "washing_machine", "job-123", "ABC_123"])
+def test_live_update_accepts_canonical_tags(hass: SimpleNamespace, tag: str) -> None:
+    validated = hass.services.schemas["notify_live_update"](
+        {"device_id": "phone", "title": "Job", "message": "Running", "tag": tag}
+    )
+    assert validated["tag"] == tag
+
+
+@pytest.mark.parametrize("tag", ["washing machine", "bad!", "a" * 65, " washer"])
+def test_live_update_rejects_invalid_tags(hass: SimpleNamespace, tag: str) -> None:
+    with pytest.raises(vol.Invalid, match="1-64 letters"):
+        hass.services.schemas["notify_live_update"](
+            {"device_id": "phone", "title": "Job", "message": "Running", "tag": tag}
+        )
+
+
 async def test_yes_no_wrapper_uses_shared_prompt_tokens(hass: SimpleNamespace) -> None:
     data = hass.services.schemas["ask_yes_no"](
         {

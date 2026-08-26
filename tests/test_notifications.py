@@ -152,7 +152,7 @@ def test_progress_image_live_and_optional_flags_payloads() -> None:
     assert progress["data"]["progress_max"] == 10
     assert progress["data"]["car_ui"] is True
     assert progress["data"]["confirmation"] is True
-    assert progress["data"][NOTIFICATION_CONFIRMATION_KEY]
+    assert NOTIFICATION_CONFIRMATION_KEY not in progress["data"]
     assert (
         progress_notification_payload(
             {"message": "Working", "tag": "job", "indeterminate": True}
@@ -234,9 +234,10 @@ async def test_concurrent_prompts_are_isolated(phone: AndroidTarget) -> None:
     ]
 
 
-async def test_text_prompt_unlock_reply_and_received_translation(
-    phone: AndroidTarget,
-) -> None:
+async def test_text_prompt_unlock_reply_and_received_translation() -> None:
+    phone = AndroidTarget(
+        "ha-device-id", "Pixel 9", "webhook-phone", "mobile_app_pixel_9"
+    )
     hass = FakeHass()
     recorder = Recorder()
     manager = NotificationManager(hass, recorder.send)
@@ -261,7 +262,7 @@ async def test_text_prompt_unlock_reply_and_received_translation(
     await manager._async_handle_received(
         SimpleNamespace(
             data={
-                "device_id": "phone",
+                "device_id": "companion-registration-id",
                 "tag": "name",
                 NOTIFICATION_CONFIRMATION_KEY: session.session_id,
             }
@@ -269,7 +270,78 @@ async def test_text_prompt_unlock_reply_and_received_translation(
     )
     assert hass.bus.fired[-1] == (
         EVENT_NOTIFICATION_RECEIVED,
-        {"device_id": "phone", "tag": "name", "session_id": session.session_id},
+        {
+            "device_id": "ha-device-id",
+            "tag": "name",
+            "session_id": session.session_id,
+        },
+    )
+
+
+async def test_multi_device_confirmations_use_unique_canonical_correlations() -> None:
+    hass = FakeHass()
+    recorder = Recorder()
+    manager = NotificationManager(hass, recorder.send)
+    first_target = AndroidTarget("ha-one", "One", "webhook-one", "mobile_app_one")
+    second_target = AndroidTarget("ha-two", "Two", "webhook-two", "mobile_app_two")
+    payload = {"message": "Test", "data": {"confirmation": True, "tag": "same"}}
+
+    first = await manager.async_send_confirmed(first_target, payload, "same")
+    second = await manager.async_send_confirmed(second_target, payload, "same")
+
+    assert first.session_id != second.session_id
+    assert (
+        recorder.calls[0][1]["data"][NOTIFICATION_CONFIRMATION_KEY] == first.session_id
+    )
+    assert (
+        recorder.calls[1][1]["data"][NOTIFICATION_CONFIRMATION_KEY] == second.session_id
+    )
+    await manager._async_handle_received(
+        SimpleNamespace(
+            data={
+                "device_id": "companion-registration-id",
+                NOTIFICATION_CONFIRMATION_KEY: second.session_id,
+            }
+        )
+    )
+    await manager._async_handle_received(
+        SimpleNamespace(
+            data={
+                "device_id": "another-registration-id",
+                NOTIFICATION_CONFIRMATION_KEY: first.session_id,
+            }
+        )
+    )
+    assert [event[1]["device_id"] for event in hass.bus.fired] == ["ha-two", "ha-one"]
+
+
+async def test_confirmation_mapping_survives_restart() -> None:
+    target = AndroidTarget("ha-device-id", "Pixel", "webhook-phone", "mobile_app_pixel")
+    store = FakeStore()
+    first = NotificationManager(FakeHass(), Recorder().send, store)
+    session = await first.async_send_confirmed(
+        target, {"message": "Late", "data": {"confirmation": True}}, "late"
+    )
+    await first.async_shutdown()
+
+    hass = FakeHass()
+    restarted = NotificationManager(hass, Recorder().send, store)
+    await restarted._async_handle_received(
+        SimpleNamespace(
+            data={
+                "device_id": "companion-registration-id",
+                NOTIFICATION_CONFIRMATION_KEY: session.session_id,
+            }
+        )
+    )
+
+    assert hass.bus.fired[-1] == (
+        EVENT_NOTIFICATION_RECEIVED,
+        {
+            "device_id": "ha-device-id",
+            "tag": "late",
+            "session_id": session.session_id,
+        },
     )
 
 
@@ -431,6 +503,15 @@ async def test_stale_and_malformed_persisted_prompts_are_pruned(
                 },
                 {"malformed": True},
             ],
+            "confirmations": [
+                {
+                    "session_id": "expired",
+                    "target": module._target_to_dict(phone),
+                    "tag": "old",
+                    "created_at": 0,
+                },
+                {"malformed": True},
+            ],
             "acknowledgements": "invalid",
         }
     )
@@ -439,7 +520,11 @@ async def test_stale_and_malformed_persisted_prompts_are_pruned(
     await manager._async_ensure_loaded()
 
     assert manager.prompts == {}
-    assert store.data == {"prompts": [], "acknowledgements": []}
+    assert store.data == {
+        "prompts": [],
+        "confirmations": [],
+        "acknowledgements": [],
+    }
 
 
 async def test_acknowledgement_restart_clears_and_recognizes_late_action(

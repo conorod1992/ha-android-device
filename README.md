@@ -291,7 +291,9 @@ Device manufacturers can add their own battery or background-execution restricti
 Notification forms offer **Show in Android Auto** (`car_ui`) and **Confirm delivery**
 where applicable. Confirmation emits `android_device_control_notification_received`
 with `device_id`, `tag`, and an opaque `session_id`. It means only that Companion
-reported receipt—not that Android displayed it or the user saw it.
+reported receipt—not that Android displayed it or the user saw it. Each target gets a
+different correlation ID; minimal canonical device/tag mappings are retained for 24
+hours so late receipts remain unambiguous across Home Assistant restarts.
 
 Actionable forms offer **Require device unlock**, which maps to Companion's
 `authenticationRequired` behavior (Android 12+). This is a device-UI requirement, not
@@ -344,7 +346,8 @@ data:
 
 Live Updates require a current compatible Companion App and Android 16+. Dispatch
 success does not prove the update rendered; unsupported devices simply handle the
-payload according to their Companion/Android capabilities.
+payload according to their Companion/Android capabilities. Live Update tags must be
+1–64 letters, numbers, hyphens, or underscores.
 
 ### Normal notification
 

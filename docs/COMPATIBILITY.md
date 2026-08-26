@@ -121,13 +121,15 @@ Progress (`progress`, `progress_max`, `progress_indeterminate`), image attachmen
 (`image`), Android Auto (`car_ui`), and receipt confirmation (`confirmation`) use the
 documented Companion fields. Receipt events are translated to
 `android_device_control_notification_received`; they mean receipt by Companion only.
-The opaque correlation value travels in the notification/event, so no notification
-message content or separate correlation lookup needs persistence.
+Each target gets a unique opaque correlation value. A bounded 24-hour mapping stores
+only that value, the canonical HA device target, and optional tag, so multi-device and
+post-restart receipts never depend on the raw Mobile App event device identifier.
 
 `notify_live_update` isolates the version-sensitive `live_update: true` contract and
-requires a stable tag and Android title. Android rendering requires Android 16+ and a
-compatible current Companion version; integration setup and dispatch remain available
-on older devices and do not claim rendering success.
+requires a stable 1–64 character `[A-Za-z0-9_-]` tag and Android title. Android
+rendering requires Android 16+ and a compatible current Companion version; integration
+setup and dispatch remain available on older devices and do not claim rendering
+success.
 
 `notify_until_acknowledged` uses the same listener and unique-token architecture. It
 dispatches immediately and defaults to five total attempts at five-minute intervals.
