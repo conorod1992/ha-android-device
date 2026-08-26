@@ -24,9 +24,12 @@ from .const import (
     DATA_NOTIFICATION_MANAGER,
     DOMAIN,
     EVENT_MOBILE_APP_NOTIFICATION_ACTION,
+    EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
     EVENT_NOTIFICATION_ACKNOWLEDGED,
     EVENT_NOTIFICATION_ACTION,
+    EVENT_NOTIFICATION_RECEIVED,
     NOTIFICATION_ACTION_PREFIX,
+    NOTIFICATION_CONFIRMATION_KEY,
 )
 from .device import AndroidTarget
 
@@ -36,6 +39,7 @@ SendNotification = Callable[[AndroidTarget, dict[str, Any]], Awaitable[None]]
 ACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MAX_PROMPT_ACTIONS = 3
 MAX_PROMPT_SESSIONS = 100
+MAX_CONFIRMATION_SESSIONS = 100
 MAX_PERSISTED_ACKNOWLEDGEMENTS = 100
 MAX_ACTION_TITLE_LENGTH = 80
 STORE_VERSION = 1
@@ -56,10 +60,64 @@ def notification_payload(
             notification_data[key] = value
     if data.get("sticky", False):
         notification_data["sticky"] = "true"
+    if data.get("show_in_android_auto", False):
+        notification_data["car_ui"] = True
+    if data.get("confirm_delivery", False):
+        notification_data["confirmation"] = True
     if urgent:
         notification_data.update({"ttl": 0, "priority": "high"})
     if notification_data:
         result["data"] = notification_data
+    return result
+
+
+def progress_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an official Companion progress notification."""
+    result = notification_payload(data)
+    notification_data = result.setdefault("data", {})
+    if data["indeterminate"]:
+        notification_data["progress_indeterminate"] = True
+    else:
+        current, maximum = data.get("current"), data.get("maximum")
+        if current is None or maximum is None:
+            raise vol.Invalid(
+                "Current and maximum are required for determinate progress"
+            )
+        if maximum <= 0 or current < 0 or current > maximum:
+            raise vol.Invalid(
+                "Progress must satisfy 0 <= current <= maximum and maximum > 0"
+            )
+        notification_data.update({"progress": current, "progress_max": maximum})
+    return result
+
+
+def image_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an official Companion image attachment notification."""
+    result = notification_payload(data)
+    result.setdefault("data", {})["image"] = data["image"]
+    return result
+
+
+def live_update_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the isolated Android 16 Companion Live Update payload."""
+    result = notification_payload(data)
+    notification_data = result.setdefault("data", {})
+    notification_data["live_update"] = True
+    for source, target in (
+        ("critical_text", "critical_text"),
+        ("icon", "notification_icon"),
+    ):
+        if value := data.get(source):
+            notification_data[target] = value
+    current, maximum = data.get("current"), data.get("maximum")
+    if (current is None) != (maximum is None):
+        raise vol.Invalid("Current and maximum must be provided together")
+    if current is not None and (maximum <= 0 or current < 0 or current > maximum):
+        raise vol.Invalid(
+            "Progress must satisfy 0 <= current <= maximum and maximum > 0"
+        )
+    if current is not None:
+        notification_data.update({"progress": current, "progress_max": maximum})
     return result
 
 
@@ -95,6 +153,16 @@ class PromptSession:
     target: AndroidTarget
     tag: str | None
     actions_by_token: dict[str, str]
+    created_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationSession:
+    """Minimal correlation metadata for one Companion receipt confirmation."""
+
+    session_id: str
+    target: AndroidTarget
+    tag: str | None
     created_at: float
 
 
@@ -166,6 +234,7 @@ class NotificationManager:
         self._loaded = self._store is None
         self._load_lock = asyncio.Lock()
         self.prompts: OrderedDict[str, PromptSession] = OrderedDict()
+        self.confirmations: OrderedDict[str, ConfirmationSession] = OrderedDict()
         self.acknowledgements: dict[tuple[str, str], AcknowledgementSession] = {}
         self.stale_acknowledgements: dict[str, StaleAcknowledgement] = {}
         self._ack_start_lock = asyncio.Lock()
@@ -180,6 +249,12 @@ class NotificationManager:
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_ACTION,
                 self._async_handle_action,
+            )
+        )
+        self._unsubscribers.append(
+            self.hass.bus.async_listen(
+                EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
+                self._async_handle_received,
             )
         )
         self._unsubscribers.append(
@@ -246,6 +321,8 @@ class NotificationManager:
         while len(self.prompts) > MAX_PROMPT_SESSIONS:
             self.prompts.popitem(last=False)
 
+        self._restore_confirmations(raw, cutoff)
+
         ack_items = raw.get("acknowledgements", [])
         for item in ack_items if isinstance(ack_items, list) else []:
             try:
@@ -268,6 +345,29 @@ class NotificationManager:
                 continue
         while len(self.stale_acknowledgements) > MAX_PERSISTED_ACKNOWLEDGEMENTS:
             self.stale_acknowledgements.pop(next(iter(self.stale_acknowledgements)))
+
+    def _restore_confirmations(self, raw: dict[str, Any], cutoff: float) -> None:
+        """Restore only valid, unexpired canonical target correlations."""
+        confirmation_items = raw.get("confirmations", [])
+        for item in confirmation_items if isinstance(confirmation_items, list) else []:
+            try:
+                session = ConfirmationSession(
+                    session_id=item["session_id"],
+                    target=_target_from_dict(item["target"]),
+                    tag=item.get("tag"),
+                    created_at=float(item["created_at"]),
+                )
+                if (
+                    session.created_at >= cutoff
+                    and isinstance(session.session_id, str)
+                    and session.session_id
+                    and (session.tag is None or isinstance(session.tag, str))
+                ):
+                    self.confirmations[session.session_id] = session
+            except (KeyError, TypeError, ValueError):
+                continue
+        while len(self.confirmations) > MAX_CONFIRMATION_SESSIONS:
+            self.confirmations.popitem(last=False)
 
     async def _async_reconcile_stale_acknowledgements(self) -> None:
         """Best-effort clear notifications whose repeating tasks ended at restart."""
@@ -295,6 +395,10 @@ class NotificationManager:
                     "prompts": [
                         _prompt_to_dict(item) for item in self.prompts.values()
                     ],
+                    "confirmations": [
+                        _confirmation_to_dict(item)
+                        for item in self.confirmations.values()
+                    ],
                     "acknowledgements": acknowledgements,
                 }
             )
@@ -303,7 +407,7 @@ class NotificationManager:
                 "Could not save notification session metadata", exc_info=True
             )
 
-    async def async_prompt(
+    async def async_prompt(  # noqa: PLR0913 - explicit public prompt options
         self,
         target: AndroidTarget,
         *,
@@ -311,6 +415,10 @@ class NotificationManager:
         message: str,
         tag: str | None,
         actions: list[dict[str, str]],
+        require_unlock: bool = False,
+        show_in_android_auto: bool = False,
+        confirm_delivery: bool = False,
+        text_input: bool = False,
     ) -> PromptSession:
         """Send one isolated actionable notification."""
         await self._async_ensure_loaded()
@@ -322,14 +430,24 @@ class NotificationManager:
         self.prompts[session_id] = session
         while len(self.prompts) > MAX_PROMPT_SESSIONS:
             self.prompts.popitem(last=False)
-        notification_data: dict[str, Any] = {
-            "actions": [
-                {"action": token, "title": item["title"]}
-                for token, item in zip(actions_by_token, actions, strict=True)
-            ]
-        }
+        action_payloads = []
+        for token, item in zip(actions_by_token, actions, strict=True):
+            action_data: dict[str, Any] = {"action": token, "title": item["title"]}
+            if require_unlock:
+                action_data["authenticationRequired"] = True
+            if text_input:
+                action_data["behavior"] = "textInput"
+            action_payloads.append(action_data)
+        notification_data: dict[str, Any] = {"actions": action_payloads}
         if tag:
             notification_data["tag"] = tag
+        if show_in_android_auto:
+            notification_data["car_ui"] = True
+        if confirm_delivery:
+            notification_data["confirmation"] = True
+            notification_data[NOTIFICATION_CONFIRMATION_KEY] = session_id
+            self._add_confirmation(session_id, target, tag)
+            await self._async_save()
         try:
             await self._send(
                 target,
@@ -337,9 +455,48 @@ class NotificationManager:
             )
         except Exception:
             self.prompts.pop(session_id, None)
+            self.confirmations.pop(session_id, None)
             await self._async_save()
             raise
         await self._async_save()
+        return session
+
+    async def async_send_confirmed(
+        self,
+        target: AndroidTarget,
+        notify_payload: dict[str, Any],
+        tag: str | None,
+    ) -> ConfirmationSession:
+        """Send with unique, persisted correlation for one canonical target."""
+        await self._async_ensure_loaded()
+        session_id = uuid4().hex
+        session = self._add_confirmation(session_id, target, tag)
+        correlated_payload = dict(notify_payload)
+        notification_data = dict(correlated_payload.get("data", {}))
+        notification_data.update(
+            {
+                "confirmation": True,
+                NOTIFICATION_CONFIRMATION_KEY: session_id,
+            }
+        )
+        correlated_payload["data"] = notification_data
+        await self._async_save()
+        try:
+            await self._send(target, correlated_payload)
+        except Exception:
+            self.confirmations.pop(session_id, None)
+            await self._async_save()
+            raise
+        return session
+
+    def _add_confirmation(
+        self, session_id: str, target: AndroidTarget, tag: str | None
+    ) -> ConfirmationSession:
+        """Add one bounded canonical-target correlation."""
+        session = ConfirmationSession(session_id, target, tag, time.time())
+        self.confirmations[session_id] = session
+        while len(self.confirmations) > MAX_CONFIRMATION_SESSIONS:
+            self.confirmations.popitem(last=False)
         return session
 
     async def async_start_acknowledgement(
@@ -419,6 +576,7 @@ class NotificationManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.acknowledgements.clear()
         self.prompts.clear()
+        self.confirmations.clear()
         self.stale_acknowledgements.clear()
         while self._unsubscribers:
             self._unsubscribers.pop()()
@@ -500,12 +658,12 @@ class NotificationManager:
         if not isinstance(action, str):
             return
         if action.startswith(NOTIFICATION_ACTION_PREFIX):
-            await self._async_handle_prompt_action(action)
+            await self._async_handle_prompt_action(action, event)
             return
         if action.startswith(ACK_NOTIFICATION_ACTION_PREFIX):
             await self._async_handle_acknowledgement(action)
 
-    async def _async_handle_prompt_action(self, token: str) -> None:
+    async def _async_handle_prompt_action(self, token: str, event: Event) -> None:
         match = next(
             (
                 (session_id, session, session.actions_by_token[token])
@@ -519,13 +677,37 @@ class NotificationManager:
         session_id, session, action_id = match
         self.prompts.pop(session_id, None)
         await self._async_save()
+        event_data = {
+            "device_id": session.target.device_id,
+            "session_id": session.session_id,
+            "action_id": action_id,
+            "tag": session.tag,
+        }
+        if isinstance(event.data.get("reply_text"), str):
+            event_data["response_text"] = event.data["reply_text"]
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACTION,
+            event_data,
+        )
+
+    async def _async_handle_received(self, event: Event) -> None:
+        """Translate only confirmations requested by this integration."""
+        await self._async_ensure_loaded()
+        session_id = event.data.get(NOTIFICATION_CONFIRMATION_KEY)
+        if not isinstance(session_id, str) or not session_id:
+            return
+        session = self.confirmations.pop(session_id, None)
+        if session is None:
+            return
+        await self._async_save()
+        if session.created_at < time.time() - SESSION_TTL:
+            return
+        self.hass.bus.async_fire(
+            EVENT_NOTIFICATION_RECEIVED,
             {
                 "device_id": session.target.device_id,
-                "session_id": session.session_id,
-                "action_id": action_id,
                 "tag": session.tag,
+                "session_id": session.session_id,
             },
         )
 
@@ -628,6 +810,15 @@ def _prompt_to_dict(session: PromptSession) -> dict[str, Any]:
         "target": _target_to_dict(session.target),
         "tag": session.tag,
         "actions_by_token": session.actions_by_token,
+        "created_at": session.created_at,
+    }
+
+
+def _confirmation_to_dict(session: ConfirmationSession) -> dict[str, Any]:
+    return {
+        "session_id": session.session_id,
+        "target": _target_to_dict(session.target),
+        "tag": session.tag,
         "created_at": session.created_at,
     }
 

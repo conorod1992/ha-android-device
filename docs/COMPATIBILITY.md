@@ -101,7 +101,7 @@ channel. Importance is a channel request: existing channel configuration and And
 OEM, Do Not Disturb, and user settings remain authoritative. Neither action forces
 audio volume or claims device-side display.
 
-`prompt`, `ask_yes_no`, and `ask_choice` share one listener and session lookup. Each
+`prompt`, `ask_yes_no`, `ask_choice`, and `ask_text` share one listener and session lookup. Each
 button receives a collision-resistant token; a matching Companion action event is
 translated to `android_device_control_notification_action` with the target device,
 prompt session, logical action ID, and optional tag. Android's documented three-action
@@ -110,6 +110,26 @@ different devices or prompts cannot cross-trigger, and stale/malformed events ar
 ignored. Minimal token-to-action mappings are stored for 24 hours so buttons already
 on a phone remain usable across a Home Assistant restart; notification content is not
 stored.
+
+`ask_text` uses Companion's `behavior: textInput` action and translates `reply_text`
+to additive `response_text` on the existing integration event. Actionable services can
+set `authenticationRequired`; Android 12+ enforces the unlock UI, but this is not
+described as a stronger security guarantee. Friendly choice fields normalize to the
+same validated action list as legacy `choices` YAML.
+
+Progress (`progress`, `progress_max`, `progress_indeterminate`), image attachments
+(`image`), Android Auto (`car_ui`), and receipt confirmation (`confirmation`) use the
+documented Companion fields. Receipt events are translated to
+`android_device_control_notification_received`; they mean receipt by Companion only.
+Each target gets a unique opaque correlation value. A bounded 24-hour mapping stores
+only that value, the canonical HA device target, and optional tag, so multi-device and
+post-restart receipts never depend on the raw Mobile App event device identifier.
+
+`notify_live_update` isolates the version-sensitive `live_update: true` contract and
+requires a stable 1–64 character `[A-Za-z0-9_-]` tag and Android title. Android
+rendering requires Android 16+ and a compatible current Companion version; integration
+setup and dispatch remain available on older devices and do not claim rendering
+success.
 
 `notify_until_acknowledged` uses the same listener and unique-token architecture. It
 dispatches immediately and defaults to five total attempts at five-minute intervals.

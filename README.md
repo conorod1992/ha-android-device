@@ -171,6 +171,8 @@ The integration includes friendly actions for most supported tasks.
 | `set_high_accuracy_interval` | Change its update interval |
 | `set_ble_transmitter` | Turn the Companion BLE transmitter on or off |
 | `configure_ble_transmitter` | Change BLE transmitter settings |
+| `set_ble_advertise_mode`, `set_ble_transmit_power` | Set BLE enum values with friendly selectors |
+| `set_ble_uuid`, `set_ble_major`, `set_ble_minor`, `set_ble_measured_power` | Set typed iBeacon identity/calibration values |
 | `set_beacon_monitor` | Turn beacon monitoring on or off |
 
 ### Alarms and timers
@@ -194,6 +196,10 @@ The integration includes friendly actions for most supported tasks.
 | `prompt` | Send a notification with custom buttons |
 | `ask_yes_no` | Send a Yes/No notification |
 | `ask_choice` | Send a notification with up to three choices |
+| `ask_text` | Ask for a free-text notification reply |
+| `notify_progress` | Create or update a tagged progress notification |
+| `notify_image` | Send an image attachment |
+| `notify_live_update` | Start or update an Android 16 Live Update |
 | `notify_until_acknowledged` | Repeat a notification until acknowledged |
 | `stop_notify_until_acknowledged` | Stop a repeating notification |
 | `clear_notification` | Clear a tagged notification |
@@ -281,6 +287,67 @@ Android 15 and newer place additional restrictions on Do Not Disturb changes. An
 Device manufacturers can add their own battery or background-execution restrictions.
 
 ## Notifications
+
+Notification forms offer **Show in Android Auto** (`car_ui`) and **Confirm delivery**
+where applicable. Confirmation emits `android_device_control_notification_received`
+with `device_id`, `tag`, and an opaque `session_id`. It means only that Companion
+reported receipt—not that Android displayed it or the user saw it. Each target gets a
+different correlation ID; minimal canonical device/tag mappings are retained for 24
+hours so late receipts remain unambiguous across Home Assistant restarts.
+
+Actionable forms offer **Require device unlock**, which maps to Companion's
+`authenticationRequired` behavior (Android 12+). This is a device-UI requirement, not
+an additional security boundary. Generic `prompt.actions` remains available for
+advanced YAML; `ask_yes_no`, the three friendly `ask_choice` label/ID pairs, and
+`ask_text` are simpler for common cases. Legacy `ask_choice.choices` YAML remains
+supported; if both forms are supplied, the legacy `choices` list takes precedence.
+
+```yaml
+action: android_device_control.ask_text
+data:
+  device_id: YOUR_DEVICE_ID
+  title: Dinner
+  message: What should I order?
+  reply_label: Reply
+  require_unlock: true
+```
+
+Replies emit `android_device_control_notification_action` with `action_id: reply` and
+`response_text`. The bounded prompt mapping survives Home Assistant restarts.
+
+```yaml
+action: android_device_control.notify_progress
+data:
+  device_id: YOUR_DEVICE_ID
+  title: Backup
+  message: Uploading 6 of 32 files
+  tag: backup
+  current: 6
+  maximum: 32
+```
+
+Use the same tag for updates. Set `indeterminate: true` without current/maximum when
+the amount is unknown. To send an attachment, use `notify_image` with `image` set to an
+HTTP(S), `/media/local`, `/local`, camera-proxy, or image-proxy path; Home Assistant
+does not fetch the file first.
+
+```yaml
+action: android_device_control.notify_live_update
+data:
+  device_id: YOUR_DEVICE_ID
+  title: Washing machine
+  message: Rinsing
+  tag: washer
+  current: 1
+  maximum: 2
+  critical_text: 50%
+  icon: mdi:washing-machine
+```
+
+Live Updates require a current compatible Companion App and Android 16+. Dispatch
+success does not prove the update rendered; unsupported devices simply handle the
+payload according to their Companion/Android capabilities. Live Update tags must be
+1–64 letters, numbers, hyphens, or underscores.
 
 ### Normal notification
 

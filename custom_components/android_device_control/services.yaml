@@ -146,6 +146,56 @@ configure_ble_transmitter:
       selector:
         text:
 
+set_ble_advertise_mode:
+  fields:
+    device_id: *device_field
+    mode:
+      required: true
+      selector:
+        select:
+          options: [low_latency, balanced, low_power]
+
+set_ble_transmit_power:
+  fields:
+    device_id: *device_field
+    power:
+      required: true
+      selector:
+        select:
+          options: [high, medium, low, ultra_low]
+
+set_ble_uuid:
+  fields:
+    device_id: *device_field
+    uuid:
+      required: true
+      selector:
+        text:
+
+set_ble_major:
+  fields: &ble_number_fields
+    device_id: *device_field
+    major:
+      required: true
+      selector:
+        number: {min: 0, max: 65535, mode: box}
+
+set_ble_minor:
+  fields:
+    device_id: *device_field
+    minor:
+      required: true
+      selector:
+        number: {min: 0, max: 65535, mode: box}
+
+set_ble_measured_power:
+  fields:
+    device_id: *device_field
+    measured_power:
+      required: true
+      selector:
+        number: {min: -127, max: -1, mode: box}
+
 set_beacon_monitor:
   fields:
     device_id: *device_field
@@ -508,6 +558,14 @@ notify: &notification_action
           max: 86400
           unit_of_measurement: s
           mode: box
+    show_in_android_auto: &android_auto_field
+      default: false
+      selector:
+        boolean:
+    confirm_delivery: &confirm_delivery_field
+      default: false
+      selector:
+        boolean:
 
 notify_urgent: *notification_action
 
@@ -526,6 +584,12 @@ prompt: &prompt_action
     tag:
       selector:
         text:
+    require_unlock: &require_unlock_field
+      default: false
+      selector:
+        boolean:
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
     actions:
       required: true
       example:
@@ -549,6 +613,9 @@ ask_yes_no:
     tag:
       selector:
         text:
+    require_unlock: *require_unlock_field
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
     yes_label:
       default: "Yes"
       selector:
@@ -573,13 +640,76 @@ ask_choice:
     tag:
       selector:
         text:
+    require_unlock: *require_unlock_field
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
     choices:
-      required: true
       example:
         - {id: home, title: Home}
         - {id: work, title: Work}
       selector:
         object:
+    choice_1_label: &choice_label
+      selector: {text: {}}
+    choice_1_id: &choice_id
+      selector: {text: {}}
+    choice_2_label: *choice_label
+    choice_2_id: *choice_id
+    choice_3_label: *choice_label
+    choice_3_id: *choice_id
+
+ask_text:
+  fields:
+    device_id: *device_field
+    title: {required: true, selector: {text: {}}}
+    message: {required: true, selector: {text: {multiline: true}}}
+    reply_label: {default: Reply, selector: {text: {}}}
+    tag: {selector: {text: {}}}
+    require_unlock: *require_unlock_field
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
+
+notify_progress:
+  fields: &progress_fields
+    device_id: *device_field
+    title: {selector: {text: {}}}
+    message: {required: true, selector: {text: {multiline: true}}}
+    tag: {required: true, selector: {text: {}}}
+    current: {selector: {number: {min: 0, mode: box}}}
+    maximum: {selector: {number: {min: 1, mode: box}}}
+    indeterminate: {default: false, selector: {boolean: {}}}
+    channel: {selector: {text: {}}}
+    importance: {selector: {select: {options: [min, low, default, high, max]}}}
+    sticky: {default: false, selector: {boolean: {}}}
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
+
+notify_image:
+  fields:
+    device_id: *device_field
+    title: {selector: {text: {}}}
+    message: {required: true, selector: {text: {multiline: true}}}
+    image: {required: true, selector: {text: {}}}
+    tag: {selector: {text: {}}}
+    channel: {selector: {text: {}}}
+    importance: {selector: {select: {options: [min, low, default, high, max]}}}
+    sticky: {default: false, selector: {boolean: {}}}
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
+
+notify_live_update:
+  fields:
+    device_id: *device_field
+    title: {required: true, selector: {text: {}}}
+    message: {required: true, selector: {text: {multiline: true}}}
+    tag: {required: true, selector: {text: {}}}
+    current: {selector: {number: {min: 0, mode: box}}}
+    maximum: {selector: {number: {min: 1, mode: box}}}
+    critical_text: {selector: {text: {}}}
+    icon: {example: mdi:washing-machine, selector: {icon: {}}}
+    sticky: {default: false, selector: {boolean: {}}}
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
 
 notify_until_acknowledged:
   fields:

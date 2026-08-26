@@ -122,6 +122,48 @@ async def test_normal_and_urgent_notification_services_return_dispatch_status(
     }
 
 
+async def test_multi_device_confirmation_dispatch_uses_unique_tokens(
+    monkeypatch: pytest.MonkeyPatch, hass: SimpleNamespace
+) -> None:
+    first = AndroidTarget("ha-one", "One", "webhook-one", "mobile_app_one")
+    second = AndroidTarget("ha-two", "Two", "webhook-two", "mobile_app_two")
+    monkeypatch.setattr(
+        services_module,
+        "resolve_android_targets",
+        lambda _hass, _ids: [first, second],
+    )
+    data = hass.services.schemas["notify"](
+        {"device_id": ["ha-one", "ha-two"], "message": "Test", "confirm_delivery": True}
+    )
+
+    response = await hass.services.handlers["notify"](
+        ServiceCall(hass, DOMAIN, "notify", data)
+    )
+
+    tokens = [
+        call[2]["data"]["android_device_control_session_id"]
+        for call in hass.services.calls
+    ]
+    assert len(set(tokens)) == 2
+    assert tokens == [item["session_id"] for item in response["devices"]]
+
+
+@pytest.mark.parametrize("tag", ["washer", "washing_machine", "job-123", "ABC_123"])
+def test_live_update_accepts_canonical_tags(hass: SimpleNamespace, tag: str) -> None:
+    validated = hass.services.schemas["notify_live_update"](
+        {"device_id": "phone", "title": "Job", "message": "Running", "tag": tag}
+    )
+    assert validated["tag"] == tag
+
+
+@pytest.mark.parametrize("tag", ["washing machine", "bad!", "a" * 65, " washer"])
+def test_live_update_rejects_invalid_tags(hass: SimpleNamespace, tag: str) -> None:
+    with pytest.raises(vol.Invalid, match="1-64 letters"):
+        hass.services.schemas["notify_live_update"](
+            {"device_id": "phone", "title": "Job", "message": "Running", "tag": tag}
+        )
+
+
 async def test_yes_no_wrapper_uses_shared_prompt_tokens(hass: SimpleNamespace) -> None:
     data = hass.services.schemas["ask_yes_no"](
         {
@@ -159,6 +201,68 @@ def test_choice_schema_rejects_duplicate_ids_and_too_many_choices(
                     "choices": choices,
                 }
             )
+
+
+async def test_friendly_choice_fields_and_ask_text(hass: SimpleNamespace) -> None:
+    choice = await call_action(
+        hass,
+        "ask_choice",
+        {
+            "title": "Where?",
+            "message": "Choose",
+            "choice_1_label": "Home",
+            "choice_1_id": "home",
+            "choice_2_label": "Work",
+            "choice_2_id": "work",
+            "require_unlock": True,
+        },
+    )
+    assert [item["title"] for item in choice["data"]["actions"]] == ["Home", "Work"]
+    assert all(item["authenticationRequired"] for item in choice["data"]["actions"])
+
+    text = await call_action(
+        hass,
+        "ask_text",
+        {"title": "Name", "message": "Your name?", "reply_label": "Answer"},
+    )
+    assert text["data"]["actions"][0]["title"] == "Answer"
+    assert text["data"]["actions"][0]["behavior"] == "textInput"
+
+
+async def test_legacy_choices_take_precedence_over_friendly_fields(
+    hass: SimpleNamespace,
+) -> None:
+    outgoing = await call_action(
+        hass,
+        "ask_choice",
+        {
+            "title": "Where?",
+            "message": "Choose",
+            "choices": [{"id": "legacy", "title": "Legacy"}],
+            "choice_1_label": "Friendly",
+            "choice_1_id": "friendly",
+        },
+    )
+    assert outgoing["data"]["actions"][0]["title"] == "Legacy"
+
+
+@pytest.mark.parametrize(
+    ("service", "field", "value", "command"),
+    [
+        ("set_ble_advertise_mode", "mode", "balanced", "ble_set_advertise_mode"),
+        ("set_ble_transmit_power", "power", "high", "ble_set_transmit_power"),
+        ("set_ble_uuid", "uuid", "1234", "ble_set_uuid"),
+        ("set_ble_major", "major", 12, "ble_set_major"),
+        ("set_ble_minor", "minor", 34, "ble_set_minor"),
+        ("set_ble_measured_power", "measured_power", -59, "ble_set_measured_power"),
+    ],
+)
+async def test_dedicated_ble_actions_match_generic_command(
+    hass: SimpleNamespace, service: str, field: str, value, command: str
+) -> None:
+    outgoing = await call_action(hass, service, {field: value})
+    assert outgoing["message"] == "command_ble_transmitter"
+    assert outgoing["data"]["command"] == command
 
 
 @pytest.mark.parametrize(
