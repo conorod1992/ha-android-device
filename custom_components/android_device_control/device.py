@@ -241,13 +241,27 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
     if device is None:
         raise _validation_error("device_not_found", device_id=device_id)
 
-    webhook_id = webhook_id_from_device_id(hass, device_id)
+    try:
+        webhook_id = webhook_id_from_device_id(hass, device_id)
+    except (AttributeError, ImportError, KeyError) as err:
+        raise _validation_error(
+            "mobile_app_unavailable", device_name=_device_name(device, device_id)
+        ) from err
     if webhook_id is None:
         raise _validation_error(
             "not_mobile_app_device", device_name=device.name_by_user or device.name
         )
 
-    entry = hass.data[MOBILE_APP_DOMAIN][DATA_CONFIG_ENTRIES].get(webhook_id)
+    mobile_data = hass.data.get(MOBILE_APP_DOMAIN)
+    entries = (
+        mobile_data.get(DATA_CONFIG_ENTRIES) if isinstance(mobile_data, dict) else None
+    )
+    if not isinstance(entries, dict):
+        raise _validation_error(
+            "mobile_app_unavailable", device_name=_device_name(device, device_id)
+        )
+
+    entry = entries.get(webhook_id)
     if entry is None:
         raise _validation_error(
             "registration_missing", device_name=device.name_by_user or device.name
@@ -258,12 +272,19 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
         raise _validation_error(
             "not_android_device", device_name=device.name_by_user or device.name
         )
-    if not supports_push(hass, webhook_id):
+    try:
+        push_supported = supports_push(hass, webhook_id)
+        notify_service = get_notify_service(hass, webhook_id)
+    except (AttributeError, ImportError, KeyError) as err:
+        raise _validation_error(
+            "mobile_app_unavailable", device_name=_device_name(device, device_id)
+        ) from err
+
+    if not push_supported:
         raise _validation_error(
             "push_not_supported", device_name=device.name_by_user or device.name
         )
 
-    notify_service = get_notify_service(hass, webhook_id)
     if notify_service is None or not hass.services.has_service(
         "notify", notify_service
     ):

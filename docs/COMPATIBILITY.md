@@ -107,21 +107,26 @@ translated to `android_device_control_notification_action` with the target devic
 prompt session, logical action ID, and optional tag. Android's documented three-action
 limit is enforced, along with unique safe IDs and non-empty bounded labels. Tokens from
 different devices or prompts cannot cross-trigger, and stale/malformed events are
-ignored.
+ignored. Minimal token-to-action mappings are stored for 24 hours so buttons already
+on a phone remain usable across a Home Assistant restart; notification content is not
+stored.
 
 `notify_until_acknowledged` uses the same listener and unique-token architecture. It
 dispatches immediately and defaults to five total attempts at five-minute intervals.
-Sessions are keyed by device and tag; a same-key start explicitly stops, clears, and
-replaces the previous session while different devices remain independent. A matching
+Sessions are keyed by device and tag. A same-key replacement is dispatched before the
+old repeating task is retired, so a failed replacement leaves the old session working.
+A matching
 acknowledgement stops repeats, requests `clear_notification`, and emits
 `android_device_control_notification_acknowledged`. The explicit stop action also
-performs best-effort tagged clearing after restart. Tasks and listeners are cancelled
-on unload/shutdown, state is not persisted, and every repeat loop is finite.
+performs best-effort tagged clearing after restart. On startup, minimal persisted
+metadata is used to clear notifications whose repeating tasks cannot safely resume;
+late acknowledgement actions remain recognizable for up to 24 hours. Tasks, storage,
+and listeners are bounded, and every repeat loop is finite.
 
 ## Find Phone notification behavior
 
 Each ringtone attempt sends a notification with `ttl: 0`, `priority: high`,
-`channel: alarm_stream`, and `tag: find_phone`. Companion categorises it as an alarm and
+`channel: alarm_stream`, and the namespaced integration tag. Companion categorises it as an alarm and
 uses the configured alarm-channel sound on the alarm audio stream at its current volume.
 It does not force maximum volume. TTS mode uses `alarm_stream_max`; Companion saves the
 current alarm-stream volume, maximises it for playback, then restores the saved value.
@@ -134,10 +139,12 @@ Later attempts send only ringtone or TTS. A new session replaces the old session
 same device; other devices are independent. Users should choose an interval appropriate
 to their configured alarm-channel sound, which can be long or ramp gradually.
 
-Stop uses Companion's documented `command_stop_tts` and `clear_notification` commands.
+Stop sends `command_stop_tts` only for a known TTS-mode session and always clears the
+integration notification. A ringtone session therefore cannot interrupt unrelated TTS.
 Clearing a notification cannot guarantee Android immediately terminates channel audio
-already playing. Flashlight-off is automatic only while an in-memory session proves
-Find Phone enabled it, or when the caller explicitly opts in after that state is lost.
+already playing. Companion does not expose the flashlight's prior state, so Find Phone
+does not turn it off automatically; the explicit post-restart cleanup option remains
+available when the caller knowingly wants that state change.
 The Stop button normally finds an active session from its unique action token, without
 requiring Companion to return arbitrary custom event fields. A prefixed but unmatched
 action stops the sole active session as a compatibility fallback; ambiguous actions are

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -31,6 +32,7 @@ from .const import (
     FIND_PHONE_EVENT_SESSION_ID,
     FIND_PHONE_NOTIFICATION_ACTION_PREFIX,
     FIND_PHONE_NOTIFICATION_TAG,
+    LEGACY_FIND_PHONE_NOTIFICATION_TAG,
 )
 from .device import (
     DATA_CONFIG_ENTRIES,
@@ -94,11 +96,6 @@ class FindPhoneSession:
     keyguard_unsubscribe: Callable[[], None] | None = None
     stop_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
-    @property
-    def flashlight_enabled(self) -> bool:
-        """Return whether this session requested flashlight-on."""
-        return self.options.flashlight
-
 
 class FindPhoneManager:
     """Own Find Phone sessions and Companion notification listeners."""
@@ -152,16 +149,21 @@ class FindPhoneManager:
         if options.stop_when_unlocked:
             self._subscribe_keyguard(session)
 
-        await self._async_send_attempt(session, first=True)
+        dispatched = await self._async_send_attempt(session, first=True)
+        if dispatched == 0:
+            self._unsubscribe_keyguard(session)
+            self._remove_if_current(session)
+            session.stop_complete.set()
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="dispatch_failed",
+                translation_placeholders={"devices": target.device_name},
+            )
         session.attempts_sent = 1
 
         if session.stop_event.is_set():
             await session.stop_complete.wait()
             return session
-        if options.attempts == 1:
-            self._finish_without_cleanup(session)
-            return session
-
         session.task = self.hass.async_create_task(
             self._async_repeat(session),
             f"{DOMAIN} Find Phone {target.device_id}",
@@ -176,7 +178,11 @@ class FindPhoneManager:
         if session is not None:
             await self._async_stop_session(session, cleanup=True)
             return
-        await self._async_cleanup(target, turn_off_flashlight=turn_off_flashlight)
+        await self._async_cleanup(
+            target,
+            clear_legacy=True,
+            turn_off_flashlight=turn_off_flashlight,
+        )
 
     async def async_shutdown(self) -> None:
         """Cancel all ephemeral work without sending phone-side commands."""
@@ -197,6 +203,7 @@ class FindPhoneManager:
 
     async def _async_repeat(self, session: FindPhoneSession) -> None:
         """Send later attempts until stopped or bounded attempts are exhausted."""
+        cleanup = False
         try:
             while session.attempts_sent < session.options.attempts:
                 try:
@@ -213,6 +220,14 @@ class FindPhoneManager:
                     break
                 await self._async_send_attempt(session, first=False)
                 session.attempts_sent += 1
+
+            if not session.stop_event.is_set():
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        session.stop_event.wait(),
+                        timeout=session.options.repeat_interval,
+                    )
+            cleanup = not session.stop_event.is_set()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -220,13 +235,14 @@ class FindPhoneManager:
                 "Unexpected Find Phone session failure for Android device %s",
                 session.device_id,
             )
+            cleanup = True
         finally:
-            if not session.stop_event.is_set():
-                self._finish_without_cleanup(session)
+            if cleanup and not session.stop_event.is_set():
+                await self._async_stop_session(session, cleanup=True)
 
     async def _async_send_attempt(
         self, session: FindPhoneSession, *, first: bool
-    ) -> None:
+    ) -> int:
         """Send one attempt, isolating transient command failures."""
         commands: list[dict[str, Any]] = []
         if first and session.options.wake_screen:
@@ -241,18 +257,21 @@ class FindPhoneManager:
             commands.append(self._control_notification(session))
         commands.append(self._sound_notification(session))
 
+        dispatched = 0
         for command in commands:
             if session.stop_event.is_set():
-                return
+                return dispatched
             try:
                 await self._send_command(session.target, command)
-            except Exception:  # noqa: BLE001 - background work must not leak failures
+                dispatched += 1
+            except Exception:  # noqa: BLE001 - isolate each background dispatch
                 _LOGGER.warning(
                     "Find Phone command %s failed for %s; later attempts will continue",
                     command["message"],
                     session.target.device_name,
                     exc_info=True,
                 )
+        return dispatched
 
     def _sound_notification(self, session: FindPhoneSession) -> dict[str, Any]:
         """Build the audible payload for a session."""
@@ -315,7 +334,9 @@ class FindPhoneManager:
             if cleanup:
                 await self._async_cleanup(
                     session.target,
-                    turn_off_flashlight=session.flashlight_enabled,
+                    clear_legacy=False,
+                    stop_tts=session.options.sound_mode == "tts",
+                    turn_off_flashlight=False,
                 )
         finally:
             self._remove_if_current(session)
@@ -379,19 +400,30 @@ class FindPhoneManager:
         await self._async_stop_session(matches[0], cleanup=True)
 
     async def _async_cleanup(
-        self, target: AndroidTarget, *, turn_off_flashlight: bool
+        self,
+        target: AndroidTarget,
+        *,
+        clear_legacy: bool,
+        stop_tts: bool = False,
+        turn_off_flashlight: bool,
     ) -> None:
         """Send independent, best-effort Companion cleanup commands."""
-        commands = [
-            payload("command_stop_tts"),
-            payload("clear_notification", {"tag": FIND_PHONE_NOTIFICATION_TAG}),
-        ]
+        commands = [payload("clear_notification", {"tag": FIND_PHONE_NOTIFICATION_TAG})]
+        if clear_legacy:
+            commands.append(
+                payload(
+                    "clear_notification",
+                    {"tag": LEGACY_FIND_PHONE_NOTIFICATION_TAG},
+                )
+            )
+        if stop_tts:
+            commands.insert(0, payload("command_stop_tts"))
         if turn_off_flashlight:
             commands.append(payload("command_flashlight", {"command": "turn_off"}))
         for command in commands:
             try:
                 await self._send_command(target, command)
-            except Exception:  # noqa: BLE001 - each cleanup command is best effort
+            except Exception:  # noqa: BLE001 - cleanup commands are independent
                 _LOGGER.warning(
                     "Find Phone cleanup command %s failed for %s",
                     command["message"],
@@ -460,7 +492,10 @@ class FindPhoneManager:
 
     async def _async_restart_cleanup(self, event: Event, device_id: str | None) -> None:
         """Use trustworthy returned metadata for best-effort post-restart cleanup."""
-        if device_id is None or event.data.get("tag") != FIND_PHONE_NOTIFICATION_TAG:
+        if device_id is None or event.data.get("tag") not in {
+            FIND_PHONE_NOTIFICATION_TAG,
+            LEGACY_FIND_PHONE_NOTIFICATION_TAG,
+        }:
             _LOGGER.warning(
                 "Ignoring Find Phone stop action because metadata is insufficient "
                 "for restart-safe cleanup"
@@ -483,7 +518,15 @@ class FindPhoneManager:
                 device_id,
             )
             return
-        await self._async_cleanup(targets[0], turn_off_flashlight=False)
+        # After restart the sound mode is unknown, so stopping TTS could interrupt
+        # unrelated Companion App speech. Clear only integration-owned notification
+        # state; explicit stop_tts remains available to the user.
+        await self._async_cleanup(
+            targets[0],
+            clear_legacy=True,
+            stop_tts=False,
+            turn_off_flashlight=False,
+        )
 
     async def _async_handle_hass_stop(self, _event: Event) -> None:
         """Abandon all sessions when Home Assistant stops."""
@@ -493,12 +536,6 @@ class FindPhoneManager:
         """Remove a session without allowing an old task to remove its replacement."""
         if self.sessions.get(session.device_id) is session:
             self.sessions.pop(session.device_id, None)
-
-    def _finish_without_cleanup(self, session: FindPhoneSession) -> None:
-        """Release listeners when a session ends without explicit cleanup."""
-        self._unsubscribe_keyguard(session)
-        self._remove_if_current(session)
-        session.stop_complete.set()
 
 
 def _registration_device_id(hass: HomeAssistant, target: AndroidTarget) -> str | None:
