@@ -161,6 +161,68 @@ def test_choice_schema_rejects_duplicate_ids_and_too_many_choices(
             )
 
 
+async def test_friendly_choice_fields_and_ask_text(hass: SimpleNamespace) -> None:
+    choice = await call_action(
+        hass,
+        "ask_choice",
+        {
+            "title": "Where?",
+            "message": "Choose",
+            "choice_1_label": "Home",
+            "choice_1_id": "home",
+            "choice_2_label": "Work",
+            "choice_2_id": "work",
+            "require_unlock": True,
+        },
+    )
+    assert [item["title"] for item in choice["data"]["actions"]] == ["Home", "Work"]
+    assert all(item["authenticationRequired"] for item in choice["data"]["actions"])
+
+    text = await call_action(
+        hass,
+        "ask_text",
+        {"title": "Name", "message": "Your name?", "reply_label": "Answer"},
+    )
+    assert text["data"]["actions"][0]["title"] == "Answer"
+    assert text["data"]["actions"][0]["behavior"] == "textInput"
+
+
+async def test_legacy_choices_take_precedence_over_friendly_fields(
+    hass: SimpleNamespace,
+) -> None:
+    outgoing = await call_action(
+        hass,
+        "ask_choice",
+        {
+            "title": "Where?",
+            "message": "Choose",
+            "choices": [{"id": "legacy", "title": "Legacy"}],
+            "choice_1_label": "Friendly",
+            "choice_1_id": "friendly",
+        },
+    )
+    assert outgoing["data"]["actions"][0]["title"] == "Legacy"
+
+
+@pytest.mark.parametrize(
+    ("service", "field", "value", "command"),
+    [
+        ("set_ble_advertise_mode", "mode", "balanced", "ble_set_advertise_mode"),
+        ("set_ble_transmit_power", "power", "high", "ble_set_transmit_power"),
+        ("set_ble_uuid", "uuid", "1234", "ble_set_uuid"),
+        ("set_ble_major", "major", 12, "ble_set_major"),
+        ("set_ble_minor", "minor", 34, "ble_set_minor"),
+        ("set_ble_measured_power", "measured_power", -59, "ble_set_measured_power"),
+    ],
+)
+async def test_dedicated_ble_actions_match_generic_command(
+    hass: SimpleNamespace, service: str, field: str, value, command: str
+) -> None:
+    outgoing = await call_action(hass, service, {field: value})
+    assert outgoing["message"] == "command_ble_transmitter"
+    assert outgoing["data"]["command"] == command
+
+
 @pytest.mark.parametrize(
     ("service", "data", "expected"),
     [

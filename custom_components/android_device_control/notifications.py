@@ -24,9 +24,12 @@ from .const import (
     DATA_NOTIFICATION_MANAGER,
     DOMAIN,
     EVENT_MOBILE_APP_NOTIFICATION_ACTION,
+    EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
     EVENT_NOTIFICATION_ACKNOWLEDGED,
     EVENT_NOTIFICATION_ACTION,
+    EVENT_NOTIFICATION_RECEIVED,
     NOTIFICATION_ACTION_PREFIX,
+    NOTIFICATION_CONFIRMATION_KEY,
 )
 from .device import AndroidTarget
 
@@ -56,10 +59,65 @@ def notification_payload(
             notification_data[key] = value
     if data.get("sticky", False):
         notification_data["sticky"] = "true"
+    if data.get("show_in_android_auto", False):
+        notification_data["car_ui"] = True
+    if data.get("confirm_delivery", False):
+        notification_data["confirmation"] = True
+        notification_data[NOTIFICATION_CONFIRMATION_KEY] = uuid4().hex
     if urgent:
         notification_data.update({"ttl": 0, "priority": "high"})
     if notification_data:
         result["data"] = notification_data
+    return result
+
+
+def progress_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an official Companion progress notification."""
+    result = notification_payload(data)
+    notification_data = result.setdefault("data", {})
+    if data["indeterminate"]:
+        notification_data["progress_indeterminate"] = True
+    else:
+        current, maximum = data.get("current"), data.get("maximum")
+        if current is None or maximum is None:
+            raise vol.Invalid(
+                "Current and maximum are required for determinate progress"
+            )
+        if maximum <= 0 or current < 0 or current > maximum:
+            raise vol.Invalid(
+                "Progress must satisfy 0 <= current <= maximum and maximum > 0"
+            )
+        notification_data.update({"progress": current, "progress_max": maximum})
+    return result
+
+
+def image_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build an official Companion image attachment notification."""
+    result = notification_payload(data)
+    result.setdefault("data", {})["image"] = data["image"]
+    return result
+
+
+def live_update_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the isolated Android 16 Companion Live Update payload."""
+    result = notification_payload(data)
+    notification_data = result.setdefault("data", {})
+    notification_data["live_update"] = True
+    for source, target in (
+        ("critical_text", "critical_text"),
+        ("icon", "notification_icon"),
+    ):
+        if value := data.get(source):
+            notification_data[target] = value
+    current, maximum = data.get("current"), data.get("maximum")
+    if (current is None) != (maximum is None):
+        raise vol.Invalid("Current and maximum must be provided together")
+    if current is not None and (maximum <= 0 or current < 0 or current > maximum):
+        raise vol.Invalid(
+            "Progress must satisfy 0 <= current <= maximum and maximum > 0"
+        )
+    if current is not None:
+        notification_data.update({"progress": current, "progress_max": maximum})
     return result
 
 
@@ -183,6 +241,12 @@ class NotificationManager:
             )
         )
         self._unsubscribers.append(
+            self.hass.bus.async_listen(
+                EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
+                self._async_handle_received,
+            )
+        )
+        self._unsubscribers.append(
             self.hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_STOP,
                 self._async_handle_hass_stop,
@@ -303,7 +367,7 @@ class NotificationManager:
                 "Could not save notification session metadata", exc_info=True
             )
 
-    async def async_prompt(
+    async def async_prompt(  # noqa: PLR0913 - explicit public prompt options
         self,
         target: AndroidTarget,
         *,
@@ -311,6 +375,10 @@ class NotificationManager:
         message: str,
         tag: str | None,
         actions: list[dict[str, str]],
+        require_unlock: bool = False,
+        show_in_android_auto: bool = False,
+        confirm_delivery: bool = False,
+        text_input: bool = False,
     ) -> PromptSession:
         """Send one isolated actionable notification."""
         await self._async_ensure_loaded()
@@ -322,14 +390,22 @@ class NotificationManager:
         self.prompts[session_id] = session
         while len(self.prompts) > MAX_PROMPT_SESSIONS:
             self.prompts.popitem(last=False)
-        notification_data: dict[str, Any] = {
-            "actions": [
-                {"action": token, "title": item["title"]}
-                for token, item in zip(actions_by_token, actions, strict=True)
-            ]
-        }
+        action_payloads = []
+        for token, item in zip(actions_by_token, actions, strict=True):
+            action_data: dict[str, Any] = {"action": token, "title": item["title"]}
+            if require_unlock:
+                action_data["authenticationRequired"] = True
+            if text_input:
+                action_data["behavior"] = "textInput"
+            action_payloads.append(action_data)
+        notification_data: dict[str, Any] = {"actions": action_payloads}
         if tag:
             notification_data["tag"] = tag
+        if show_in_android_auto:
+            notification_data["car_ui"] = True
+        if confirm_delivery:
+            notification_data["confirmation"] = True
+            notification_data[NOTIFICATION_CONFIRMATION_KEY] = session_id
         try:
             await self._send(
                 target,
@@ -500,12 +576,12 @@ class NotificationManager:
         if not isinstance(action, str):
             return
         if action.startswith(NOTIFICATION_ACTION_PREFIX):
-            await self._async_handle_prompt_action(action)
+            await self._async_handle_prompt_action(action, event)
             return
         if action.startswith(ACK_NOTIFICATION_ACTION_PREFIX):
             await self._async_handle_acknowledgement(action)
 
-    async def _async_handle_prompt_action(self, token: str) -> None:
+    async def _async_handle_prompt_action(self, token: str, event: Event) -> None:
         match = next(
             (
                 (session_id, session, session.actions_by_token[token])
@@ -519,13 +595,31 @@ class NotificationManager:
         session_id, session, action_id = match
         self.prompts.pop(session_id, None)
         await self._async_save()
+        event_data = {
+            "device_id": session.target.device_id,
+            "session_id": session.session_id,
+            "action_id": action_id,
+            "tag": session.tag,
+        }
+        if isinstance(event.data.get("reply_text"), str):
+            event_data["response_text"] = event.data["reply_text"]
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACTION,
+            event_data,
+        )
+
+    async def _async_handle_received(self, event: Event) -> None:
+        """Translate only confirmations requested by this integration."""
+        session_id = event.data.get(NOTIFICATION_CONFIRMATION_KEY)
+        device_id = event.data.get("device_id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        self.hass.bus.async_fire(
+            EVENT_NOTIFICATION_RECEIVED,
             {
-                "device_id": session.target.device_id,
-                "session_id": session.session_id,
-                "action_id": action_id,
-                "tag": session.tag,
+                "device_id": device_id,
+                "tag": event.data.get("tag"),
+                "session_id": session_id,
             },
         )
 

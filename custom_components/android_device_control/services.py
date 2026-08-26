@@ -72,7 +72,10 @@ from .notifications import (
     AcknowledgementOptions,
     async_remove_notification_manager,
     get_notification_manager,
+    image_notification_payload,
+    live_update_payload,
     notification_payload,
+    progress_notification_payload,
     validate_actions,
 )
 
@@ -161,6 +164,25 @@ def _app_lock_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def _ble_builder(data: dict[str, Any]) -> dict[str, Any]:
     return ble_configuration_payload(data["setting"], data["value"])
+
+
+def _dedicated_ble_builder(setting: str, field: str) -> PayloadBuilder:
+    return lambda data: ble_configuration_payload(setting, data[field])
+
+
+def _friendly_choices(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Prefer legacy choices when supplied, otherwise normalize friendly fields."""
+    if "choices" in data:
+        return data["choices"]
+    items = []
+    for number in range(1, 4):
+        action_id = data.get(f"choice_{number}_id", "").strip()
+        label = data.get(f"choice_{number}_label", "").strip()
+        if action_id or label:
+            if not action_id or not label:
+                raise vol.Invalid(f"Choice {number} requires both label and ID")
+            items.append({"id": action_id, "title": label})
+    return validate_actions(items)
 
 
 def _high_accuracy_builder(data: dict[str, Any]) -> dict[str, Any]:
@@ -306,11 +328,21 @@ async def _async_notification(hass: HomeAssistant, call: ServiceCall) -> dict[st
     targets, resolution_failures = _resolve_targets_independently(
         hass, data.pop(ATTR_DEVICE_ID)
     )
-    urgent = call.service == SERVICE_NOTIFY_URGENT
+    builders = {
+        SERVICE_NOTIFY_PROGRESS: progress_notification_payload,
+        SERVICE_NOTIFY_IMAGE: image_notification_payload,
+        SERVICE_NOTIFY_LIVE_UPDATE: live_update_payload,
+    }
+    builder = builders.get(call.service)
+    notify_payload = (
+        builder(data)
+        if builder is not None
+        else notification_payload(data, urgent=call.service == SERVICE_NOTIFY_URGENT)
+    )
     return await _async_dispatch_with_response(
         hass,
         targets,
-        notification_payload(data, urgent=urgent),
+        notify_payload,
         resolution_failures,
     )
 
@@ -324,8 +356,12 @@ async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any
             {"id": "yes", "title": data["yes_label"]},
             {"id": "no", "title": data["no_label"]},
         ]
+    elif call.service == SERVICE_PROMPT:
+        actions = data["actions"]
+    elif call.service == SERVICE_ASK_TEXT:
+        actions = [{"id": "reply", "title": data["reply_label"]}]
     else:
-        actions = data["actions" if call.service == SERVICE_PROMPT else "choices"]
+        actions = _friendly_choices(data)
     manager = get_notification_manager(hass, partial(_async_send, hass))
     results = await asyncio.gather(
         *(
@@ -335,6 +371,10 @@ async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any
                 message=data["message"],
                 tag=data.get("tag"),
                 actions=actions,
+                require_unlock=data["require_unlock"],
+                show_in_android_auto=data["show_in_android_auto"],
+                confirm_delivery=data["confirm_delivery"],
+                text_input=call.service == SERVICE_ASK_TEXT,
             )
             for target in targets
         ),
@@ -595,6 +635,8 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         vol.Optional("importance"): vol.In({"min", "low", "default", "high", "max"}),
         vol.Optional("sticky", default=False): cv.boolean,
         vol.Optional("timeout"): vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        vol.Optional("show_in_android_auto", default=False): cv.boolean,
+        vol.Optional("confirm_delivery", default=False): cv.boolean,
     }
     hass.services.async_register(
         DOMAIN,
@@ -611,6 +653,8 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         vol.Optional("importance", default="high"): vol.In({"default", "high", "max"}),
         vol.Optional("sticky", default=False): cv.boolean,
         vol.Optional("timeout"): vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        vol.Optional("show_in_android_auto", default=False): cv.boolean,
+        vol.Optional("confirm_delivery", default=False): cv.boolean,
     }
     hass.services.async_register(
         DOMAIN,
@@ -623,6 +667,9 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         vol.Required("title"): _non_empty,
         vol.Required("message"): _non_empty,
         vol.Optional("tag"): _non_empty,
+        vol.Optional("require_unlock", default=False): cv.boolean,
+        vol.Optional("show_in_android_auto", default=False): cv.boolean,
+        vol.Optional("confirm_delivery", default=False): cv.boolean,
     }
     for name, extra in (
         (SERVICE_PROMPT, {vol.Required("actions"): validate_actions}),
@@ -633,13 +680,69 @@ def _register_notification_services(hass: HomeAssistant) -> None:
                 vol.Optional("no_label", default="No"): _action_label,
             },
         ),
-        (SERVICE_ASK_CHOICE, {vol.Required("choices"): validate_actions}),
+        (
+            SERVICE_ASK_CHOICE,
+            {
+                vol.Optional("choices"): validate_actions,
+                **{
+                    vol.Optional(f"choice_{number}_{part}"): _action_label
+                    for number in range(1, 4)
+                    for part in ("label", "id")
+                },
+            },
+        ),
+        (
+            SERVICE_ASK_TEXT,
+            {vol.Optional("reply_label", default="Reply"): _action_label},
+        ),
     ):
         hass.services.async_register(
             DOMAIN,
             name,
             partial(_async_prompt, hass),
             schema=_schema(prompt_base | extra),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+    presentation_fields = {
+        vol.Optional("channel"): _non_empty,
+        vol.Optional("importance"): vol.In({"min", "low", "default", "high", "max"}),
+        vol.Optional("sticky", default=False): cv.boolean,
+        vol.Optional("show_in_android_auto", default=False): cv.boolean,
+        vol.Optional("confirm_delivery", default=False): cv.boolean,
+    }
+    progress_fields = presentation_fields | {
+        vol.Optional("title", default=""): cv.string,
+        vol.Required("message"): _non_empty,
+        vol.Required("tag"): _non_empty,
+        vol.Optional("current"): vol.Coerce(int),
+        vol.Optional("maximum"): vol.Coerce(int),
+        vol.Optional("indeterminate", default=False): cv.boolean,
+    }
+    image_fields = presentation_fields | {
+        vol.Optional("title", default=""): cv.string,
+        vol.Required("message"): _non_empty,
+        vol.Optional("tag"): _non_empty,
+        vol.Required("image"): _non_empty,
+    }
+    live_fields = presentation_fields | {
+        vol.Required("title"): _non_empty,
+        vol.Required("message"): _non_empty,
+        vol.Required("tag"): _non_empty,
+        vol.Optional("current"): vol.Coerce(int),
+        vol.Optional("maximum"): vol.Coerce(int),
+        vol.Optional("critical_text"): cv.string,
+        vol.Optional("icon"): cv.string,
+    }
+    for name, fields in (
+        (SERVICE_NOTIFY_PROGRESS, progress_fields),
+        (SERVICE_NOTIFY_IMAGE, image_fields),
+        (SERVICE_NOTIFY_LIVE_UPDATE, live_fields),
+    ):
+        hass.services.async_register(
+            DOMAIN,
+            name,
+            partial(_async_notification, hass),
+            schema=_schema(fields),
             supports_response=SupportsResponse.OPTIONAL,
         )
     hass.services.async_register(
@@ -829,6 +932,45 @@ def async_register_services(hass: HomeAssistant) -> None:
         ),
         _ble_builder,
     )
+    for service_name, setting, field, validator in (
+        (
+            SERVICE_SET_BLE_ADVERTISE_MODE,
+            "advertise_mode",
+            "mode",
+            vol.In({"low_latency", "balanced", "low_power"}),
+        ),
+        (
+            SERVICE_SET_BLE_TRANSMIT_POWER,
+            "transmit_power",
+            "power",
+            vol.In({"high", "medium", "low", "ultra_low"}),
+        ),
+        (SERVICE_SET_BLE_UUID, "uuid", "uuid", _non_empty),
+        (
+            SERVICE_SET_BLE_MAJOR,
+            "major",
+            "major",
+            vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        ),
+        (
+            SERVICE_SET_BLE_MINOR,
+            "minor",
+            "minor",
+            vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
+        ),
+        (
+            SERVICE_SET_BLE_MEASURED_POWER,
+            "measured_power",
+            "measured_power",
+            vol.All(vol.Coerce(int), vol.Range(min=-127, max=-1)),
+        ),
+    ):
+        _register(
+            hass,
+            service_name,
+            _schema({vol.Required(field): validator}),
+            _dedicated_ble_builder(setting, field),
+        )
     _register(
         hass,
         SERVICE_SET_HIGH_ACCURACY_MODE,

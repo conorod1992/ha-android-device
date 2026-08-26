@@ -10,12 +10,17 @@ from custom_components.android_device_control import notifications as module
 from custom_components.android_device_control.const import (
     EVENT_NOTIFICATION_ACKNOWLEDGED,
     EVENT_NOTIFICATION_ACTION,
+    EVENT_NOTIFICATION_RECEIVED,
+    NOTIFICATION_CONFIRMATION_KEY,
 )
 from custom_components.android_device_control.device import AndroidTarget
 from custom_components.android_device_control.notifications import (
     AcknowledgementOptions,
     NotificationManager,
+    image_notification_payload,
+    live_update_payload,
     notification_payload,
+    progress_notification_payload,
     validate_actions,
 )
 
@@ -131,6 +136,67 @@ def test_action_validation_normalizes_and_rejects_unsafe_choices() -> None:
             validate_actions(actions)
 
 
+def test_progress_image_live_and_optional_flags_payloads() -> None:
+    progress = progress_notification_payload(
+        {
+            "message": "Copying",
+            "tag": "copy",
+            "current": 3,
+            "maximum": 10,
+            "indeterminate": False,
+            "show_in_android_auto": True,
+            "confirm_delivery": True,
+        }
+    )
+    assert progress["data"]["progress"] == 3
+    assert progress["data"]["progress_max"] == 10
+    assert progress["data"]["car_ui"] is True
+    assert progress["data"]["confirmation"] is True
+    assert progress["data"][NOTIFICATION_CONFIRMATION_KEY]
+    assert (
+        progress_notification_payload(
+            {"message": "Working", "tag": "job", "indeterminate": True}
+        )["data"]["progress_indeterminate"]
+        is True
+    )
+    assert (
+        image_notification_payload(
+            {"message": "Camera", "image": "/media/local/door.jpg"}
+        )["data"]["image"]
+        == "/media/local/door.jpg"
+    )
+    assert live_update_payload(
+        {
+            "title": "Washer",
+            "message": "Rinsing",
+            "tag": "washer",
+            "current": 0,
+            "maximum": 2,
+            "critical_text": "50%",
+        }
+    )["data"] == {
+        "tag": "washer",
+        "live_update": True,
+        "progress": 0,
+        "progress_max": 2,
+        "critical_text": "50%",
+    }
+
+
+def test_progress_validation_rejects_invalid_values() -> None:
+    for current, maximum in ((None, None), (2, 1), (-1, 10), (0, 0)):
+        with pytest.raises(vol.Invalid):
+            progress_notification_payload(
+                {
+                    "message": "Bad",
+                    "tag": "bad",
+                    "current": current,
+                    "maximum": maximum,
+                    "indeterminate": False,
+                }
+            )
+
+
 async def test_concurrent_prompts_are_isolated(phone: AndroidTarget) -> None:
     hass = FakeHass()
     recorder = Recorder()
@@ -166,6 +232,45 @@ async def test_concurrent_prompts_are_isolated(phone: AndroidTarget) -> None:
             },
         )
     ]
+
+
+async def test_text_prompt_unlock_reply_and_received_translation(
+    phone: AndroidTarget,
+) -> None:
+    hass = FakeHass()
+    recorder = Recorder()
+    manager = NotificationManager(hass, recorder.send)
+    manager.async_register()
+    session = await manager.async_prompt(
+        phone,
+        title="Name",
+        message="What is your name?",
+        tag="name",
+        actions=[{"id": "reply", "title": "Reply"}],
+        require_unlock=True,
+        text_input=True,
+        confirm_delivery=True,
+    )
+    action = recorder.calls[-1][1]["data"]["actions"][0]
+    assert action["behavior"] == "textInput"
+    assert action["authenticationRequired"] is True
+    await manager._async_handle_action(
+        SimpleNamespace(data={"action": action["action"], "reply_text": "Conor"})
+    )
+    assert hass.bus.fired[-1][1]["response_text"] == "Conor"
+    await manager._async_handle_received(
+        SimpleNamespace(
+            data={
+                "device_id": "phone",
+                "tag": "name",
+                NOTIFICATION_CONFIRMATION_KEY: session.session_id,
+            }
+        )
+    )
+    assert hass.bus.fired[-1] == (
+        EVENT_NOTIFICATION_RECEIVED,
+        {"device_id": "phone", "tag": "name", "session_id": session.session_id},
+    )
 
 
 async def test_malformed_unrelated_and_stale_prompt_actions_are_ignored(
