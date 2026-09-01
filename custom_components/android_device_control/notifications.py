@@ -75,10 +75,14 @@ def progress_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
     """Build an official Companion progress notification."""
     result = notification_payload(data)
     notification_data = result.setdefault("data", {})
+    current = data.get("current")
+    if current == -1:
+        notification_data["progress"] = -1
+        return result
     if data["indeterminate"]:
         notification_data["progress_indeterminate"] = True
     else:
-        current, maximum = data.get("current"), data.get("maximum")
+        maximum = data.get("maximum")
         if current is None or maximum is None:
             raise vol.Invalid(
                 "Current and maximum are required for determinate progress"
