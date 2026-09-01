@@ -174,6 +174,12 @@ def _app_lock_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ble_builder(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the backwards-compatible generic BLE configuration command."""
+    if data["setting"] == "measured_power":
+        try:
+            int(data["value"])
+        except (TypeError, ValueError, OverflowError) as err:
+            raise vol.Invalid("BLE measured power must be a negative number") from err
     return ble_configuration_payload(data["setting"], data["value"])
 
 
@@ -299,6 +305,43 @@ def _resolve_targets_independently(
             },
         )
     return targets, failures
+
+
+def _result_failures(
+    targets: list[AndroidTarget], results: list[Any]
+) -> list[dict[str, Any]]:
+    """Convert per-target exceptions into the shared dispatch-failure shape."""
+    failures: list[dict[str, Any]] = []
+    for target, result in zip(targets, results, strict=True):
+        if not isinstance(result, BaseException):
+            continue
+        failures.append(
+            {
+                "device_id": target.device_id,
+                "device_name": target.device_name,
+                "dispatched": False,
+                "error": str(result) or type(result).__name__,
+            }
+        )
+    return failures
+
+
+def _failure_device_names(failures: list[dict[str, Any]]) -> str:
+    """Return a stable comma-separated device label for translated errors."""
+    return ", ".join(item["device_name"] for item in failures)
+
+
+def _log_partial_failures(operation: str, failures: list[dict[str, Any]]) -> None:
+    """Log a concise warning when a best-effort multi-device action partly fails."""
+    if not failures:
+        return
+    detail = "; ".join(
+        f"{item['device_name']}: {item.get('error', 'unknown error')}"
+        for item in failures
+    )
+    _LOGGER.warning(
+        "%s succeeded for at least one device but failed for %s", operation, detail
+    )
 
 
 async def _async_dispatch_with_response(
@@ -517,7 +560,7 @@ async def _async_handle(
     """Validate all devices, build once, and dispatch independently."""
     data = dict(call.data)
     device_ids = data.pop(ATTR_DEVICE_ID)
-    targets, _resolution_failures = _resolve_targets_independently(hass, device_ids)
+    targets, resolution_failures = _resolve_targets_independently(hass, device_ids)
     try:
         notify_payload = builder(data)
     except vol.Invalid as err:
@@ -527,22 +570,21 @@ async def _async_handle(
         *(_async_send(hass, target, notify_payload) for target in targets),
         return_exceptions=True,
     )
-    failures = [
-        target.device_name
-        for target, result in zip(targets, results, strict=True)
-        if isinstance(result, BaseException)
-    ]
-    if len(failures) == len(targets):
+    dispatch_failures = _result_failures(targets, results)
+    failures = resolution_failures + dispatch_failures
+    if len(dispatch_failures) == len(targets):
+        device_names = _failure_device_names(failures)
         _LOGGER.warning(
             "Android command %s failed for %s",
             notify_payload["message"],
-            ", ".join(failures),
+            device_names,
         )
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
-            translation_placeholders={"devices": ", ".join(failures)},
+            translation_placeholders={"devices": device_names},
         )
+    _log_partial_failures(f"Android command {notify_payload['message']}", failures)
 
 
 async def _async_handle_with_response(
@@ -565,7 +607,7 @@ async def _async_handle_with_response(
 async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
     """Start independent, bounded Find Phone sessions for selected devices."""
     data = dict(call.data)
-    targets, _resolution_failures = _resolve_targets_independently(
+    targets, resolution_failures = _resolve_targets_independently(
         hass, data.pop(ATTR_DEVICE_ID)
     )
     options = FindPhoneOptions(
@@ -584,36 +626,47 @@ async def _async_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
         *(manager.async_start(target, options) for target in targets),
         return_exceptions=True,
     )
-    failures = [
-        target.device_name
-        for target, result in zip(targets, results, strict=True)
-        if isinstance(result, BaseException)
-    ]
-    if len(failures) == len(targets):
-        _LOGGER.warning("Find Phone could not start for %s", ", ".join(failures))
+    dispatch_failures = _result_failures(targets, results)
+    failures = resolution_failures + dispatch_failures
+    if len(dispatch_failures) == len(targets):
+        device_names = _failure_device_names(failures)
+        _LOGGER.warning("Find Phone could not start for %s", device_names)
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
-            translation_placeholders={"devices": ", ".join(failures)},
+            translation_placeholders={"devices": device_names},
         )
+    _log_partial_failures("Find Phone", failures)
 
 
 async def _async_stop_find_phone(hass: HomeAssistant, call: ServiceCall) -> None:
     """Stop selected sessions and perform best-effort phone-side cleanup."""
     data = dict(call.data)
-    targets, _resolution_failures = _resolve_targets_independently(
+    targets, resolution_failures = _resolve_targets_independently(
         hass, data.pop(ATTR_DEVICE_ID)
     )
     manager = get_find_phone_manager(hass, partial(_async_send, hass))
-    await asyncio.gather(
+    results = await asyncio.gather(
         *(
             manager.async_stop(
                 target,
                 turn_off_flashlight=data["turn_off_flashlight"],
             )
             for target in targets
-        )
+        ),
+        return_exceptions=True,
     )
+    stop_failures = _result_failures(targets, results)
+    failures = resolution_failures + stop_failures
+    if len(stop_failures) == len(targets):
+        device_names = _failure_device_names(failures)
+        _LOGGER.warning("Stop Find Phone failed for %s", device_names)
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="dispatch_failed",
+            translation_placeholders={"devices": device_names},
+        )
+    _log_partial_failures("Stop Find Phone", failures)
 
 
 async def _async_check_device(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
