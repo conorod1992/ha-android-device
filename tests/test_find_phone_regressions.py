@@ -67,7 +67,8 @@ async def test_active_stop_honours_explicit_flashlight_cleanup() -> None:
 
     await manager.async_stop(phone, turn_off_flashlight=True)
 
-    assert session.task is not None and session.task.done()
+    assert session.task is not None
+    assert session.task.done()
     assert manager.sessions == {}
     assert [command["message"] for command in calls[-2:]] == [
         "clear_notification",
