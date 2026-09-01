@@ -1,8 +1,9 @@
 """Regression tests for notification action polish."""
 
+import logging
 from pathlib import Path
 
-import yaml
+from homeassistant.util.yaml import load_yaml
 
 from custom_components.android_device_control.notifications import (
     live_update_payload,
@@ -41,10 +42,17 @@ def test_live_update_presentation_fields_are_forwarded() -> None:
     assert result["data"]["live_update"] is True
 
 
-def test_service_metadata_exposes_notification_polish() -> None:
-    """Action UI metadata should match the runtime notification capabilities."""
-    services = yaml.safe_load(
-        Path("custom_components/android_device_control/services.yaml").read_text()
+def test_service_metadata_exposes_notification_polish(caplog) -> None:
+    """Action UI metadata should load cleanly through Home Assistant's YAML parser."""
+    with caplog.at_level(logging.WARNING, logger="annotatedyaml.constructors"):
+        services = load_yaml(
+            Path("custom_components/android_device_control/services.yaml")
+        )
+
+    assert not any(
+        record.name == "annotatedyaml.constructors"
+        and "duplicate key" in record.getMessage().lower()
+        for record in caplog.records
     )
 
     urgent = services["notify_urgent"]["fields"]
