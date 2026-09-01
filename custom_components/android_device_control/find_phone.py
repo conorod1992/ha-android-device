@@ -149,7 +149,9 @@ class FindPhoneManager:
         if options.stop_when_unlocked:
             self._subscribe_keyguard(session)
 
-        dispatched, sound_dispatched = await self._async_send_attempt(session, first=True)
+        dispatched, sound_dispatched = await self._async_send_attempt(
+            session, first=True
+        )
         if dispatched == 0 or (not options.repeat and not sound_dispatched):
             self._unsubscribe_keyguard(session)
             self._remove_if_current(session)
