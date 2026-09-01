@@ -170,7 +170,21 @@ async def test_find_phone_partial_failure_is_logged_and_valid_session_survives(
     monkeypatch.setattr(
         services_module, "resolve_android_targets", _two_target_resolver()
     )
-    hass.services.fail_targets.add("webhook-tablet")
+    manager = SimpleNamespace(sessions={})
+
+    async def start(target, _options):
+        if target.device_id == "tablet":
+            raise RuntimeError("find phone start failed")
+        session = SimpleNamespace(device_id=target.device_id)
+        manager.sessions[target.device_id] = session
+        return session
+
+    manager.async_start = start
+    monkeypatch.setattr(
+        services_module,
+        "get_find_phone_manager",
+        lambda _hass, _send: manager,
+    )
 
     with caplog.at_level(logging.WARNING, logger=services_module.__name__):
         await _call(
@@ -183,10 +197,9 @@ async def test_find_phone_partial_failure_is_logged_and_valid_session_survives(
             },
         )
 
-    manager = hass.data[DOMAIN][services_module.DATA_FIND_PHONE_MANAGER]
     assert set(manager.sessions) == {"phone"}
     assert "Find Phone succeeded for at least one device" in caplog.text
-    assert "Pixel Tablet:" in caplog.text
+    assert "Pixel Tablet: find phone start failed" in caplog.text
 
 
 async def test_stop_find_phone_logs_partial_resolution_failure(
