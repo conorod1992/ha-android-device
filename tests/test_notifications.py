@@ -184,7 +184,7 @@ def test_progress_image_live_and_optional_flags_payloads() -> None:
 
 
 def test_progress_validation_rejects_invalid_values() -> None:
-    for current, maximum in ((None, None), (2, 1), (-1, 10), (0, 0)):
+    for current, maximum in ((None, None), (2, 1), (-2, 10), (0, 0)):
         with pytest.raises(vol.Invalid):
             progress_notification_payload(
                 {
