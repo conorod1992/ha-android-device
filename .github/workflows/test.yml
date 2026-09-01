@@ -17,6 +17,7 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: python -m pip install -r requirements_test.txt
+      - run: python scripts/set_release_version.py --check
       - run: ruff format --check .
       - run: ruff check .
       - run: pytest

@@ -149,8 +149,10 @@ class FindPhoneManager:
         if options.stop_when_unlocked:
             self._subscribe_keyguard(session)
 
-        dispatched = await self._async_send_attempt(session, first=True)
-        if dispatched == 0:
+        dispatched, sound_dispatched = await self._async_send_attempt(
+            session, first=True
+        )
+        if dispatched == 0 or (not options.repeat and not sound_dispatched):
             self._unsubscribe_keyguard(session)
             self._remove_if_current(session)
             session.stop_complete.set()
@@ -176,7 +178,11 @@ class FindPhoneManager:
         """Stop one session and perform best-effort device cleanup."""
         session = self.sessions.get(target.device_id)
         if session is not None:
-            await self._async_stop_session(session, cleanup=True)
+            await self._async_stop_session(
+                session,
+                cleanup=True,
+                turn_off_flashlight=turn_off_flashlight,
+            )
             return
         await self._async_cleanup(
             target,
@@ -242,7 +248,7 @@ class FindPhoneManager:
 
     async def _async_send_attempt(
         self, session: FindPhoneSession, *, first: bool
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Send one attempt, isolating transient command failures."""
         commands: list[dict[str, Any]] = []
         if first and session.options.wake_screen:
@@ -255,15 +261,19 @@ class FindPhoneManager:
             and session.options.show_stop_action
         ):
             commands.append(self._control_notification(session))
-        commands.append(self._sound_notification(session))
+        sound_command = self._sound_notification(session)
+        commands.append(sound_command)
 
         dispatched = 0
+        sound_dispatched = False
         for command in commands:
             if session.stop_event.is_set():
-                return dispatched
+                return dispatched, sound_dispatched
             try:
                 await self._send_command(session.target, command)
                 dispatched += 1
+                if command is sound_command:
+                    sound_dispatched = True
             except Exception:  # noqa: BLE001 - isolate each background dispatch
                 _LOGGER.warning(
                     "Find Phone command %s failed for %s; later attempts will continue",
@@ -271,7 +281,7 @@ class FindPhoneManager:
                     session.target.device_name,
                     exc_info=True,
                 )
-        return dispatched
+        return dispatched, sound_dispatched
 
     def _sound_notification(self, session: FindPhoneSession) -> dict[str, Any]:
         """Build the audible payload for a session."""
@@ -317,13 +327,23 @@ class FindPhoneManager:
         }
 
     async def _async_stop_session(
-        self, session: FindPhoneSession, *, cleanup: bool
+        self,
+        session: FindPhoneSession,
+        *,
+        cleanup: bool,
+        turn_off_flashlight: bool = False,
     ) -> None:
         """Interrupt one session and optionally clean up its phone state."""
         if self.sessions.get(session.device_id) is not session:
             return
         if session.stop_event.is_set():
             await session.stop_complete.wait()
+            if cleanup and turn_off_flashlight:
+                await self._async_cleanup(
+                    session.target,
+                    clear_legacy=False,
+                    turn_off_flashlight=True,
+                )
             return
 
         session.stop_event.set()
@@ -336,7 +356,7 @@ class FindPhoneManager:
                     session.target,
                     clear_legacy=False,
                     stop_tts=session.options.sound_mode == "tts",
-                    turn_off_flashlight=False,
+                    turn_off_flashlight=turn_off_flashlight,
                 )
         finally:
             self._remove_if_current(session)

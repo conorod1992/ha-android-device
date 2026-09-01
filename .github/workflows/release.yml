@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z)"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Validate target release version
+        id: version
+        env:
+          TARGET_VERSION: ${{ inputs.version }}
+        run: |
+          CURRENT_VERSION="$(python scripts/set_release_version.py --check)"
+          python - "$CURRENT_VERSION" "$TARGET_VERSION" <<'PY'
+          import re
+          import sys
+
+          current, target = sys.argv[1:3]
+          pattern = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+          if not pattern.fullmatch(target):
+              raise SystemExit(f"Release version must use X.Y.Z format, got {target!r}")
+          if not pattern.fullmatch(current):
+              raise SystemExit(f"Current tracked version is not X.Y.Z: {current!r}")
+          if tuple(map(int, target.split("."))) <= tuple(map(int, current.split("."))):
+              raise SystemExit(
+                  f"Release version {target} must be newer than current release {current}"
+              )
+          PY
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify main represents the latest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          LATEST_RELEASE="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)"
+          if [[ "$LATEST_RELEASE" != "v$CURRENT_VERSION" ]]; then
+            echo "main is staged as $CURRENT_VERSION but the latest release is $LATEST_RELEASE"
+            echo "Do not pre-bump manifest.json; the Release workflow owns version bumps."
+            exit 1
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Capture checked-out source commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stage target version
+        run: |
+          python scripts/set_release_version.py "${{ steps.version.outputs.version }}"
+          python scripts/set_release_version.py --check
+          git diff --check
+
+      - name: Refuse to publish from stale main
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          git fetch origin main
+          MAIN_SHA="$(git rev-parse origin/main)"
+          if [[ "$MAIN_SHA" != "$SOURCE_SHA" ]]; then
+            echo "main moved from $SOURCE_SHA to $MAIN_SHA while the release was being prepared"
+            echo "No version bump or release has been published. Re-run from current main."
+            exit 1
+          fi
+
+      - name: Commit release version
+        id: release_commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/android_device_control/manifest.json
+          if git diff --cached --quiet; then
+            echo "Target version produced no release metadata changes"
+            exit 1
+          fi
+          git commit -m "chore: bump version to $VERSION"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
+        run: |
+          gh release create "v$VERSION" \
+            --target "$RELEASE_SHA" \
+            --title "v$VERSION" \
+            --generate-notes
