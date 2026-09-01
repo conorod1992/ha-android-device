@@ -527,7 +527,7 @@ send_command:
         object:
 
 notify:
-  fields: &notification_fields
+  fields:
     device_id: *device_field
     title:
       selector:
@@ -569,7 +569,18 @@ notify:
 
 notify_urgent:
   fields:
-    <<: *notification_fields
+    device_id: *device_field
+    title:
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    tag:
+      selector:
+        text:
     channel:
       default: Urgent
       selector:
@@ -579,6 +590,19 @@ notify_urgent:
       selector:
         select:
           options: [default, high, max]
+    sticky:
+      default: false
+      selector:
+        boolean:
+    timeout:
+      selector:
+        number:
+          min: 1
+          max: 86400
+          unit_of_measurement: s
+          mode: box
+    show_in_android_auto: *android_auto_field
+    confirm_delivery: *confirm_delivery_field
 
 prompt: &prompt_action
   fields:
