@@ -79,7 +79,10 @@ def set_release_version(version: str, root: Path = ROOT) -> None:
     for spec in SPECS:
         path = root / spec.path
         text = path.read_text(encoding="utf-8")
-        replacement = lambda match: f"{match.group(1)}{version}{match.group(2)}"
+
+        def replacement(match: re.Match[str]) -> str:
+            return f"{match.group(1)}{version}{match.group(2)}"
+
         updated, count = re.subn(
             spec.replace_pattern,
             replacement,
