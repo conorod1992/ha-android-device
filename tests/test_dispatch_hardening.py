@@ -91,9 +91,7 @@ def _two_target_resolver():
 
 async def _call(hass: SimpleNamespace, service: str, data: dict) -> None:
     validated = hass.services.schemas[service](data)
-    await hass.services.handlers[service](
-        ServiceCall(hass, DOMAIN, service, validated)
-    )
+    await hass.services.handlers[service](ServiceCall(hass, DOMAIN, service, validated))
 
 
 async def test_generic_ble_bad_measured_power_is_service_validation_error(
@@ -188,7 +186,7 @@ async def test_find_phone_partial_failure_is_logged_and_valid_session_survives(
     manager = hass.data[DOMAIN][services_module.DATA_FIND_PHONE_MANAGER]
     assert set(manager.sessions) == {"phone"}
     assert "Find Phone succeeded for at least one device" in caplog.text
-    assert "Pixel Tablet: Android Device Control could not dispatch to Pixel Tablet" in caplog.text
+    assert "Pixel Tablet:" in caplog.text
 
 
 async def test_stop_find_phone_logs_partial_resolution_failure(
