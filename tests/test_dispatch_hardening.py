@@ -39,7 +39,7 @@ class FakeServices:
         self.calls.append((domain, service, data, blocking))
         target = data["target"][0]
         if target in self.fail_targets:
-            raise HomeAssistantError(f"transport failed for {target}")
+            raise RuntimeError(f"transport failed for {target}")
 
     def async_services(self):
         return {DOMAIN: {name: {} for name in self.handlers}}
