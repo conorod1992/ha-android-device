@@ -526,8 +526,8 @@ send_command:
       selector:
         object:
 
-notify: &notification_action
-  fields:
+notify:
+  fields: &notification_fields
     device_id: *device_field
     title:
       selector:
@@ -567,7 +567,18 @@ notify: &notification_action
       selector:
         boolean:
 
-notify_urgent: *notification_action
+notify_urgent:
+  fields:
+    <<: *notification_fields
+    channel:
+      default: Urgent
+      selector:
+        text:
+    importance:
+      default: high
+      selector:
+        select:
+          options: [default, high, max]
 
 prompt: &prompt_action
   fields:
@@ -675,7 +686,10 @@ notify_progress:
     title: {selector: {text: {}}}
     message: {required: true, selector: {text: {multiline: true}}}
     tag: {required: true, selector: {text: {}}}
-    current: {selector: {number: {min: 0, mode: box}}}
+    current:
+      description: Current progress, or -1 to remove the progress bar when complete.
+      selector:
+        number: {min: -1, mode: box}
     maximum: {selector: {number: {min: 1, mode: box}}}
     indeterminate: {default: false, selector: {boolean: {}}}
     channel: {selector: {text: {}}}
@@ -707,6 +721,8 @@ notify_live_update:
     maximum: {selector: {number: {min: 1, mode: box}}}
     critical_text: {selector: {text: {}}}
     icon: {example: mdi:washing-machine, selector: {icon: {}}}
+    channel: {selector: {text: {}}}
+    importance: {selector: {select: {options: [min, low, default, high, max]}}}
     sticky: {default: false, selector: {boolean: {}}}
     show_in_android_auto: *android_auto_field
     confirm_delivery: *confirm_delivery_field
