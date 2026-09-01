@@ -44,7 +44,7 @@ You normally **do not need to know your `notify.mobile_app_*` action name, Andro
 
 You need:
 
-- **Home Assistant 2026.7 or newer**
+- **Home Assistant 2026.7.2 or newer**
 - the official **Home Assistant Companion App for Android**
 - the Android device registered with the same Home Assistant server
 - push notifications enabled for that device
@@ -804,7 +804,7 @@ Make sure you:
 
 1. installed the repository in HACS rather than only adding it as a custom repository;
 2. restarted Home Assistant after installation; and
-3. are using Home Assistant 2026.7 or newer.
+3. are using Home Assistant 2026.7.2 or newer.
 
 ### Setup says it cannot find an Android device
 
