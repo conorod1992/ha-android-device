@@ -31,12 +31,29 @@ async def test_user_step_reports_discovered_devices(
     )
     result = await flow.async_step_user()
     assert result["type"] == "form"
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "devices_unready"
     assert result["description_placeholders"] == {
         "device_count": "2",
         "device_names": "Pixel 9, Kitchen tablet",
         "ready_count": "1",
+        "unready_devices": "Kitchen tablet",
     }
+
+
+async def test_all_ready_devices_use_normal_setup(monkeypatch, flow):
+    monkeypatch.setattr(
+        config_flow_module,
+        "discover_android_devices",
+        lambda _: [{"device_name": "Pixel", "ready": True}],
+    )
+    result = await flow.async_step_user()
+    assert result["step_id"] == "user"
+    assert "unready_devices" not in result["description_placeholders"]
+
+
+async def test_unready_device_explanation_can_finish_setup(flow):
+    result = await flow.async_step_devices_unready({})
+    assert result["type"] == "create_entry"
 
 
 async def test_user_step_explains_when_no_devices_are_found(

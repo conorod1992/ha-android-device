@@ -1,7 +1,7 @@
 # Companion command compatibility matrix
 
 Inventory reviewed against the official Android command list, notification
-documentation, and Android public intent documentation on 2026-08-12.
+documentation, and Android public intent documentation on 2026-10-31.
 
 ## Companion notification-command wrappers
 
@@ -32,14 +32,7 @@ documentation, and Android public intent documentation on 2026-08-12.
 | `command_webview` | Implemented | `open_webview`; paths and `entityId:` forms |
 | `remove_channel` | Implemented | `remove_notification_channel` |
 | `request_location_update` | Implemented | `request_location_update` |
-| `kiosk_show_screensaver` | Implemented | `kiosk_show_screensaver` |
-| `kiosk_hide_screensaver` | Implemented | `kiosk_hide_screensaver` |
-| `kiosk_show_camera` | Implemented | `kiosk_show_camera` |
-| `kiosk_hide_camera` | Implemented | `kiosk_hide_camera` |
-| `kiosk_set_brightness` | Implemented | `kiosk_set_brightness` |
-| `kiosk_set_volume` | Implemented | `kiosk_set_volume` |
-| `kiosk_reload` | Implemented | `kiosk_reload` |
-| `kiosk_default` | Implemented | `kiosk_default` |
+| `kiosk_*` | Not applicable | iOS-only. Earlier Android wrappers are deprecated and raise a clear error without dispatch; raw messages reject these commands. |
 | `clear_badge` | Not applicable | Documented for Apple platforms, not Android |
 | `update_complications` | Not applicable | Apple Watch only |
 | `update_widgets` | Not applicable | Listed in the cross-platform table but not the Android command table |
@@ -81,6 +74,11 @@ typed `structured_extras` list. The exposed, safely coercible subset of the Comp
 parser is: strings, booleans, integers, longs, floats, doubles, and integer lists.
 Strings use `String.urlencoded`; integer lists use Companion's semicolon format.
 Raw input remains untouched for backwards compatibility.
+
+Structured integers and list entries must fit Android's signed 32-bit integer range;
+longs must fit the signed 64-bit range. Fractional, boolean, and nonfinite integer
+values are rejected rather than truncated. Timed calendar inputs are normalized to
+UTC for ordering, with naive values interpreted in Home Assistant's timezone.
 
 The current Companion source has a defect in its URL-decoded string-array branches:
 each element decodes the full joined value. Structured string arrays are deliberately
@@ -135,6 +133,9 @@ success.
 dispatches immediately and defaults to five total attempts at five-minute intervals.
 Sessions are keyed by device and tag. A same-key replacement is dispatched before the
 old repeating task is retired, so a failed replacement leaves the old session working.
+Replacement, repeats, acknowledgement, explicit stop, and expiry cleanup share a lock
+for each device/tag, so old cleanup cannot clear a replacement. Different targets
+remain independent.
 A matching
 acknowledgement stops repeats, requests `clear_notification`, and emits
 `android_device_control_notification_acknowledged`. The explicit stop action also
@@ -166,10 +167,13 @@ already playing. Companion does not expose the flashlight's prior state, so Find
 does not turn it off automatically; the explicit post-restart cleanup option remains
 available when the caller knowingly wants that state change.
 The Stop button normally finds an active session from its unique action token, without
-requiring Companion to return arbitrary custom event fields. A prefixed but unmatched
-action stops the sole active session as a compatibility fallback; ambiguous actions are
-ignored when multiple sessions are active. Returned device and session metadata still
-allows best-effort conservative cleanup after Home Assistant restarts.
+requiring Companion to return arbitrary custom event fields. Unmatched tokens never
+stop another active session. Returned device and session metadata allows conservative
+cleanup after a restart only when that device has no newer active session.
+
+Start, stop, replacement, and repeat dispatch are serialized per device. Stop waits
+for an in-flight initial or repeat dispatch before clearing. Repeating tasks use the
+config entry's background-task lifecycle and do not hold up Home Assistant idle waits.
 
 Session state is deliberately ephemeral: it is neither stored nor restored, and no
 attempts resume after restart. Unload and Home Assistant shutdown cancel tasks and

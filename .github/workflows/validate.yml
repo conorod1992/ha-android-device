@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: hacs/action@main
         with:
           category: integration
@@ -22,4 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: home-assistant/actions/hassfest@master

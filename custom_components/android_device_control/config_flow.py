@@ -26,14 +26,22 @@ class AndroidDeviceControlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         devices = discover_android_devices(self.hass)
         if not devices:
             return self.async_show_form(step_id="no_devices")
+        unready = [device["device_name"] for device in devices if not device["ready"]]
         return self.async_show_form(
-            step_id="user",
+            step_id="devices_unready" if unready else "user",
             description_placeholders={
                 "device_count": str(len(devices)),
                 "device_names": ", ".join(device["device_name"] for device in devices),
                 "ready_count": str(sum(device["ready"] for device in devices)),
+                **({"unready_devices": ", ".join(unready)} if unready else {}),
             },
         )
+
+    async def async_step_devices_unready(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Allow setup with named devices and an actionable diagnostic next step."""
+        return await self.async_step_user(user_input)
 
     async def async_step_no_devices(
         self, user_input: dict[str, Any] | None = None
