@@ -172,8 +172,8 @@ def test_phone_sms_and_email_composition() -> None:
         )
     )
     assert email["intent_uri"].startswith("mailto:a@example.test,b@example.test?")
-    assert "subject=Hello+%26+welcome" in email["intent_uri"]
-    assert "body=Line+1%0ALine+2" in email["intent_uri"]
+    assert "subject=Hello%20%26%20welcome" in email["intent_uri"]
+    assert "body=Line%201%0D%0ALine%202" in email["intent_uri"]
 
 
 def test_calendar_fields_timezone_all_day_and_attendees() -> None:

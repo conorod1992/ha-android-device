@@ -74,14 +74,6 @@ RAW_EXACT_MESSAGES = {
     "request_location_update",
     "clear_notification",
     "remove_channel",
-    "kiosk_show_screensaver",
-    "kiosk_hide_screensaver",
-    "kiosk_show_camera",
-    "kiosk_hide_camera",
-    "kiosk_set_brightness",
-    "kiosk_set_volume",
-    "kiosk_reload",
-    "kiosk_default",
 }
 
 ALARM_ACTION_SET = "android.intent.action.SET_ALARM"

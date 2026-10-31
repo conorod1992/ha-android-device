@@ -279,7 +279,8 @@ def _resolve_targets_independently(
     """Resolve each selected device without one stale target blocking the rest."""
     targets: list[AndroidTarget] = []
     failures: list[dict[str, Any]] = []
-    for device_id in dict.fromkeys(device_ids):
+    unique_ids = list(dict.fromkeys(device_ids))
+    for device_id in unique_ids:
         try:
             resolved = resolve_android_targets(hass, [device_id])
             target = next(
@@ -297,21 +298,23 @@ def _resolve_targets_independently(
                 continue
             targets.append(target)
         except HomeAssistantError as err:
+            if len(unique_ids) == 1:
+                raise
             failures.append(
                 {
                     "device_id": device_id,
-                    "device_name": device_id,
+                    "device_name": (err.translation_placeholders or {}).get(
+                        "device_name", device_id
+                    ),
                     "dispatched": False,
                     "error": str(err),
                 }
             )
     if not targets:
-        raise HomeAssistantError(
+        raise ServiceValidationError(
             translation_domain=DOMAIN,
-            translation_key="dispatch_failed",
-            translation_placeholders={
-                "devices": ", ".join(item["device_name"] for item in failures)
-            },
+            translation_key="targets_unavailable",
+            translation_placeholders={"details": _failure_device_names(failures)},
         )
     return targets, failures
 
@@ -336,8 +339,13 @@ def _result_failures(
 
 
 def _failure_device_names(failures: list[dict[str, Any]]) -> str:
-    """Return a stable comma-separated device label for translated errors."""
-    return ", ".join(item["device_name"] for item in failures)
+    """Retain friendly target names and the cause of each failed dispatch."""
+    return "; ".join(
+        f"{item['device_name']}: {item['error']}"
+        if item.get("error")
+        else item["device_name"]
+        for item in failures
+    )
 
 
 def _log_partial_failures(operation: str, failures: list[dict[str, Any]]) -> None:
@@ -378,9 +386,7 @@ async def _async_dispatch_with_response(
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
-            translation_placeholders={
-                "devices": ", ".join(item["device_name"] for item in response)
-            },
+            translation_placeholders={"devices": _failure_device_names(response)},
         )
     return {"devices": response}
 
@@ -427,9 +433,7 @@ async def _async_notification(hass: HomeAssistant, call: ServiceCall) -> dict[st
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="dispatch_failed",
-                translation_placeholders={
-                    "devices": ", ".join(item["device_name"] for item in devices)
-                },
+                translation_placeholders={"devices": _failure_device_names(devices)},
             )
         return {"devices": devices}
     return await _async_dispatch_with_response(
@@ -488,9 +492,7 @@ async def _async_prompt(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
-            translation_placeholders={
-                "devices": ", ".join(item["device_name"] for item in devices)
-            },
+            translation_placeholders={"devices": _failure_device_names(devices)},
         )
     return {"devices": devices}
 
@@ -530,9 +532,7 @@ async def _async_notify_until_acknowledged(
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="dispatch_failed",
-            translation_placeholders={
-                "devices": ", ".join(item["device_name"] for item in devices)
-            },
+            translation_placeholders={"devices": _failure_device_names(devices)},
         )
     return {"devices": devices}
 
@@ -899,6 +899,11 @@ def _register_action(
     async def handle(call: ServiceCall) -> Any:
         token = _DISPATCH_CONTEXT.set(call.context)
         try:
+            if name.startswith("kiosk_"):
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="unsupported_kiosk",
+                )
             return await handler(call)
         except vol.Invalid as err:
             raise ServiceValidationError(str(err)) from err

@@ -23,6 +23,9 @@
     "not_android_device": {"message": "{device_name} is not an Android Home Assistant Companion device."},
     "push_not_supported": {"message": "{device_name} is not configured to receive Mobile App push notifications."},
     "notify_target_missing": {"message": "No Mobile App notification target could be found for {device_name}. Restart Home Assistant after enabling notifications in the Companion App."},
+    "integration_unloading": {"message": "Android Device Control is unloading. Wait for setup or reload to finish, then try again."},
+    "unsupported_kiosk": {"message": "Companion kiosk commands are supported on iOS, not Android. This deprecated action sends no command. Use Android screen, volume, or Companion page actions instead."},
+    "targets_unavailable": {"message": "No selected device is ready: {details}"},
     "dispatch_failed": {"message": "The command could not be dispatched to: {devices}. Other selected devices may have received it."}
   },
   "selector": {

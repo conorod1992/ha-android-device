@@ -81,7 +81,9 @@ def progress_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
         notification_data["progress"] = -1
         return result
     if data["indeterminate"]:
-        notification_data["progress_indeterminate"] = True
+        notification_data.update(
+            {"progress": 0, "progress_max": 1, "progress_indeterminate": True}
+        )
     else:
         maximum = data.get("maximum")
         if current is None or maximum is None:

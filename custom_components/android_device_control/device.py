@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,7 @@ ATTR_APP_VERSION = "app_version"
 DATA_DEVICES = "devices"
 ANDROID_BLUETOOTH_TOGGLE_MAX_VERSION = 12
 ANDROID_ASSISTANT_STREAM_MIN_VERSION = 17
+MOBILE_APP_ERRORS = (AttributeError, ImportError, KeyError, TypeError)
 
 
 def webhook_id_from_device_id(hass: HomeAssistant, device_id: str) -> str | None:
@@ -63,6 +65,45 @@ def _device_name(device: Any, device_id: str) -> str:
     if device is None:
         return device_id
     return device.name_by_user or device.name or device_id
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    """Treat incomplete Mobile App runtime containers as unavailable metadata."""
+    return value if isinstance(value, Mapping) else {}
+
+
+def _inspect_registration(
+    hass: HomeAssistant, device_id: str, device_exists: bool
+) -> dict[str, Any]:
+    """Isolate private Mobile App helpers during setup, reload, and API changes."""
+    result: dict[str, Any] = {
+        "webhook_id": None,
+        "entry": None,
+        "push_supported": False,
+        "notify_service": None,
+        "available": True,
+    }
+    if not device_exists:
+        return result
+    try:
+        mobile_data = hass.data.get(MOBILE_APP_DOMAIN)
+        if not isinstance(mobile_data, Mapping):
+            result["available"] = False
+            return result
+        webhook_id = webhook_id_from_device_id(hass, device_id)
+        result["webhook_id"] = webhook_id
+        entries = mobile_data.get(DATA_CONFIG_ENTRIES)
+        if not isinstance(entries, Mapping):
+            result["available"] = False
+            return result
+        entry = entries.get(webhook_id) if webhook_id else None
+        result["entry"] = entry
+        if webhook_id and entry is not None:
+            result["push_supported"] = supports_push(hass, webhook_id)
+            result["notify_service"] = get_notify_service(hass, webhook_id)
+    except MOBILE_APP_ERRORS:
+        result["available"] = False
+    return result
 
 
 def _compatibility_observations(
@@ -130,20 +171,17 @@ def inspect_mobile_app_device(hass: HomeAssistant, device_id: str) -> dict[str, 
     registry_device = dr.async_get(hass).async_get(device_id)
     device_exists = registry_device is not None
     name = _device_name(registry_device, device_id)
-    webhook_id = webhook_id_from_device_id(hass, device_id) if device_exists else None
+    registration = _inspect_registration(hass, device_id, device_exists)
+    webhook_id = registration["webhook_id"]
     mobile_app_device = webhook_id is not None
-    mobile_data = hass.data.get(MOBILE_APP_DOMAIN, {})
-    entries = mobile_data.get(DATA_CONFIG_ENTRIES, {})
-    entry = entries.get(webhook_id) if webhook_id else None
+    entry = registration["entry"]
     registration_exists = entry is not None
-    entry_data = entry.data if entry else {}
+    entry_data = _mapping(entry.data) if entry else {}
     os_name = str(entry_data.get(ATTR_OS_NAME, "")) or None
     os_version = str(entry_data.get(ATTR_OS_VERSION, "")) or None
     is_android = bool(os_name and os_name.casefold() == "android")
-    push_supported = bool(
-        webhook_id and registration_exists and supports_push(hass, webhook_id)
-    )
-    notify_service = get_notify_service(hass, webhook_id) if webhook_id else None
+    push_supported = bool(registration["push_supported"])
+    notify_service = registration["notify_service"]
     notify_target_available = bool(
         notify_service and hass.services.has_service("notify", notify_service)
     )
@@ -154,6 +192,7 @@ def inspect_mobile_app_device(hass: HomeAssistant, device_id: str) -> dict[str, 
         and is_android
         and push_supported
         and notify_target_available
+        and registration["available"]
     )
 
     observations = _compatibility_observations(
@@ -174,6 +213,12 @@ def inspect_mobile_app_device(hass: HomeAssistant, device_id: str) -> dict[str, 
             push_supported=push_supported,
         )
     )
+    if not registration["available"]:
+        status = "mobile_app_unavailable"
+        observations.append(
+            "Mobile App setup or reload is incomplete. Wait for it to finish, "
+            "then run Check device compatibility again."
+        )
 
     return {
         "device_id": device_id,
@@ -211,15 +256,16 @@ def inspect_mobile_app_device(hass: HomeAssistant, device_id: str) -> dict[str, 
 
 def discover_android_devices(hass: HomeAssistant) -> list[dict[str, Any]]:
     """Discover current Android Mobile App registrations without contacting them."""
-    mobile_data = hass.data.get(MOBILE_APP_DOMAIN, {})
-    registrations = mobile_data.get(DATA_CONFIG_ENTRIES, {})
-    devices = mobile_data.get(DATA_DEVICES, {})
+    mobile_data = _mapping(hass.data.get(MOBILE_APP_DOMAIN))
+    registrations = _mapping(mobile_data.get(DATA_CONFIG_ENTRIES))
+    devices = _mapping(mobile_data.get(DATA_DEVICES))
     discovered = []
     for webhook_id, registry_device in devices.items():
         entry = registrations.get(webhook_id)
         if (
             entry is None
-            or str(entry.data.get(ATTR_OS_NAME, "")).casefold() != "android"
+            or str(_mapping(entry.data).get(ATTR_OS_NAME, "")).casefold() != "android"
+            or not isinstance(getattr(registry_device, "id", None), str)
         ):
             continue
         discovered.append(inspect_mobile_app_device(hass, registry_device.id))
@@ -243,7 +289,7 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
 
     try:
         webhook_id = webhook_id_from_device_id(hass, device_id)
-    except (AttributeError, ImportError, KeyError) as err:
+    except MOBILE_APP_ERRORS as err:
         raise _validation_error(
             "mobile_app_unavailable", device_name=_device_name(device, device_id)
         ) from err
@@ -254,9 +300,11 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
 
     mobile_data = hass.data.get(MOBILE_APP_DOMAIN)
     entries = (
-        mobile_data.get(DATA_CONFIG_ENTRIES) if isinstance(mobile_data, dict) else None
+        mobile_data.get(DATA_CONFIG_ENTRIES)
+        if isinstance(mobile_data, Mapping)
+        else None
     )
-    if not isinstance(entries, dict):
+    if not isinstance(entries, Mapping):
         raise _validation_error(
             "mobile_app_unavailable", device_name=_device_name(device, device_id)
         )
@@ -267,7 +315,7 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
             "registration_missing", device_name=device.name_by_user or device.name
         )
 
-    os_name = str(entry.data.get(ATTR_OS_NAME, ""))
+    os_name = str(_mapping(entry.data).get(ATTR_OS_NAME, ""))
     if os_name.casefold() != "android":
         raise _validation_error(
             "not_android_device", device_name=device.name_by_user or device.name
@@ -275,7 +323,7 @@ def resolve_android_target(hass: HomeAssistant, device_id: str) -> AndroidTarget
     try:
         push_supported = supports_push(hass, webhook_id)
         notify_service = get_notify_service(hass, webhook_id)
-    except (AttributeError, ImportError, KeyError) as err:
+    except MOBILE_APP_ERRORS as err:
         raise _validation_error(
             "mobile_app_unavailable", device_name=_device_name(device, device_id)
         ) from err

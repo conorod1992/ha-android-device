@@ -579,6 +579,12 @@ async def test_dedicated_ble_actions_match_generic_command(
 async def test_every_action_payload(
     hass: SimpleNamespace, service: str, data: dict, expected: dict
 ) -> None:
+    if service.startswith("kiosk_"):
+        with pytest.raises(HomeAssistantError) as error:
+            await call_action(hass, service, data)
+        assert error.value.translation_key == "unsupported_kiosk"
+        assert not hass.services.calls
+        return
     outgoing = await call_action(hass, service, data)
     assert {key: outgoing[key] for key in expected} == expected
     assert outgoing["target"] == ["webhook-phone"]
