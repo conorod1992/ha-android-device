@@ -4,8 +4,7 @@ The Android end-to-end workflow runs for pull requests and can be run manually.
 The Release workflow also requires it to pass before publishing.
 
 It boots an Android 35 x86_64 emulator and installs the official **2026.10.1
-minimal Companion APK**, verified against its published SHA-256 digest. A fresh
-Home Assistant instance loads this checkout's custom integration. The tests create
+minimal Companion APK**, verified against its published SHA-256 digest. A fresh official Home Assistant **2026.7.2** container loads this checkout's custom integration. The tests create
 a disposable owner account, onboard Companion through its UI, and use its real
 Mobile App registration and persistent WebSocket connection for local push.
 No personal credentials, Firebase project, or externally reachable server is needed.
@@ -28,12 +27,13 @@ and UI hierarchy. The progress test also captures its notification shade.
 To reproduce locally on Linux with a disposable emulator already running:
 
 ```sh
-pip install -r requirements_test.txt uiautomator2==3.5.0 websocket-client==1.9.0
+pip install pytest==8.4.1 pytest-asyncio==1.1.0 requests==2.32.5 uiautomator2==3.5.0 websocket-client==1.9.0
+docker pull ghcr.io/home-assistant/home-assistant:2026.7.2
 # Download and verify companion.apk using the workflow's pinned URL and digest.
 python -m pytest e2e/android -v --junitxml=e2e-artifacts/results.xml
 ```
 
-Port 8123 must be free; the emulator reaches its host through `10.0.2.2`. These tests
+Docker must be available and port 8123 must be free; the emulator reaches its host through `10.0.2.2`. These tests
 are separate from the normal `pytest` suite. APK upgrades should update both the URL
 and digest and be validated through this workflow.
 

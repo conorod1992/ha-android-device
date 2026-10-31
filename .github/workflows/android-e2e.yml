@@ -20,7 +20,9 @@ jobs:
           python-version: "3.14"
           cache: pip
       - name: Install server and test tools
-        run: pip install -r requirements_test.txt uiautomator2==3.5.0 websocket-client==1.9.0
+        run: pip install pytest==8.4.1 pytest-asyncio==1.1.0 requests==2.32.5 uiautomator2==3.5.0 websocket-client==1.9.0
+      - name: Pull complete Home Assistant runtime
+        run: docker pull ghcr.io/home-assistant/home-assistant:2026.7.2
       - name: Download pinned official Companion APK
         run: |
           curl --fail --location --retry 3 -o companion.apk https://github.com/home-assistant/android/releases/download/2026.10.1/app-minimal-release.apk

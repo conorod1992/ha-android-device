@@ -145,7 +145,20 @@ def environment(tmp_path_factory):
     )
     log = (ARTIFACTS / "home-assistant.log").open("w")
     process = subprocess.Popen(  # noqa: S603 - disposable local HA process
-        [shutil.which("hass"), "--config", str(config)], stdout=log, stderr=log
+        [
+            shutil.which("docker"),
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "--name",
+            "ha-android-e2e",
+            "--volume",
+            f"{config}:/config",
+            "ghcr.io/home-assistant/home-assistant:2026.7.2",
+        ],
+        stdout=log,
+        stderr=log,
     )
     phone = None
     server = None
@@ -227,7 +240,12 @@ def environment(tmp_path_factory):
         )
         if server:
             server.ws.close()
-        process.terminate()
+        subprocess.run(  # noqa: S603 - fixed disposable container name
+            [shutil.which("docker"), "stop", "--time", "15", "ha-android-e2e"],
+            check=False,
+            timeout=30,
+            capture_output=True,
+        )
         process.wait(timeout=30)
         log.close()
 
