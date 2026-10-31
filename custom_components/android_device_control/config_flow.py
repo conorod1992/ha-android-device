@@ -9,6 +9,12 @@ from homeassistant import config_entries
 from .const import DOMAIN
 from .device import discover_android_devices
 
+_READINESS_REASONS = {
+    "mobile_app_unavailable": "Mobile App setup or reload is incomplete",
+    "push_unavailable": "no push channel is registered",
+    "notify_target_unavailable": "the Mobile App notify target is unavailable",
+}
+
 
 class AndroidDeviceControlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Create the single service-only integration entry."""
@@ -26,14 +32,21 @@ class AndroidDeviceControlConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         devices = discover_android_devices(self.hass)
         if not devices:
             return self.async_show_form(step_id="no_devices")
-        unready = [device["device_name"] for device in devices if not device["ready"]]
+        unready = []
+        for device in devices:
+            if device["ready"]:
+                continue
+            reason = _READINESS_REASONS.get(
+                device["status"], "Mobile App registration is unavailable"
+            )
+            unready.append(f"{device['device_name']} ({reason})")
         return self.async_show_form(
             step_id="devices_unready" if unready else "user",
             description_placeholders={
                 "device_count": str(len(devices)),
                 "device_names": ", ".join(device["device_name"] for device in devices),
                 "ready_count": str(sum(device["ready"] for device in devices)),
-                **({"unready_devices": ", ".join(unready)} if unready else {}),
+                **({"unready_devices": "; ".join(unready)} if unready else {}),
             },
         )
 
