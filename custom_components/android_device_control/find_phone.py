@@ -174,9 +174,20 @@ class FindPhoneManager:
             await self._async_stop_locked(session, cleanup=not self._closing)
             raise
         if dispatched == 0 or (not options.repeat and not sound_dispatched):
-            self._unsubscribe_keyguard(session)
-            self._remove_if_current(session)
-            session.stop_complete.set()
+            try:
+                if (
+                    dispatched
+                    and options.sound_mode == "tts"
+                    and options.show_stop_action
+                ):
+                    # A quiet TTS control notification may have succeeded even
+                    # though sound dispatch failed. Clear our notification
+                    # without stopping unrelated speech.
+                    await self._async_cleanup(
+                        target, clear_legacy=False, turn_off_flashlight=False
+                    )
+            finally:
+                await self._async_stop_locked(session, cleanup=False)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="dispatch_failed",
@@ -397,20 +408,22 @@ class FindPhoneManager:
 
         session.stop_event.set()
         self._unsubscribe_keyguard(session)
-        if session.task is not None and session.task is not asyncio.current_task():
-            session.task.cancel()
-            await asyncio.gather(session.task, return_exceptions=True)
         try:
-            if cleanup:
-                await self._async_cleanup(
-                    session.target,
-                    clear_legacy=False,
-                    stop_tts=session.options.sound_mode == "tts",
-                    turn_off_flashlight=turn_off_flashlight,
-                )
+            if session.task is not None and session.task is not asyncio.current_task():
+                session.task.cancel()
+                await asyncio.gather(session.task, return_exceptions=True)
         finally:
-            self._remove_if_current(session)
-            session.stop_complete.set()
+            try:
+                if cleanup:
+                    await self._async_cleanup(
+                        session.target,
+                        clear_legacy=False,
+                        stop_tts=session.options.sound_mode == "tts",
+                        turn_off_flashlight=turn_off_flashlight,
+                    )
+            finally:
+                self._remove_if_current(session)
+                session.stop_complete.set()
 
     def _subscribe_keyguard(self, session: FindPhoneSession) -> None:
         """Watch the enabled Companion keyguard sensor for one active session."""

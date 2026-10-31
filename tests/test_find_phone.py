@@ -331,6 +331,34 @@ async def test_initial_optional_failure_still_starts_when_sound_dispatches(
     await manager.async_shutdown()
 
 
+@pytest.mark.parametrize("show_stop_action", [False, True])
+async def test_failed_one_shot_tts_clears_its_control_notification(
+    phone, show_stop_action
+):
+    calls = []
+
+    async def fail_sound(_target, command):
+        calls.append(command)
+        if command["message"] == "TTS":
+            raise RuntimeError("TTS unavailable")
+
+    manager = FindPhoneManager(FakeHass(), fail_sound)
+    with pytest.raises(HomeAssistantError):
+        await manager.async_start(
+            phone,
+            options(sound_mode="tts", repeat=False, show_stop_action=show_stop_action),
+        )
+    assert not manager.sessions
+    assert [item["message"] for item in calls] == [
+        "command_screen_on",
+        *(["Finding phone"] if show_stop_action else []),
+        "TTS",
+        *(["clear_notification"] if show_stop_action else []),
+    ]
+    if show_stop_action:
+        assert calls[-1]["data"]["tag"] == FIND_PHONE_NOTIFICATION_TAG
+
+
 async def test_exact_action_stops_only_matching_session(
     phone: AndroidTarget,
 ) -> None:

@@ -289,6 +289,71 @@ async def test_acknowledgement_stop_clear_precedes_replacement(resources):
     assert manager.acknowledgements[new.key] is new
 
 
+async def test_cancelled_replacement_keeps_dispatched_acknowledgement_controllable(
+    resources,
+):
+    managers, _ = resources
+    hass = FakeHass()
+    recorder = Recorder()
+    store = FakeStore()
+    manager = NotificationManager(hass, recorder.send, store)
+    managers.append(manager)
+    old = await manager.async_start_acknowledgement(PHONE, ack_options(message="old"))
+    start = asyncio.create_task(
+        manager.async_start_acknowledgement(PHONE, ack_options(message="new"))
+    )
+    # Cancel the caller precisely when the old repeat task finishes retiring.
+    old.task.add_done_callback(lambda _task: start.cancel())
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    new = manager.acknowledgements[old.key]
+    assert new is not old
+    assert not new.stop_event.is_set()
+    assert not new.task.done()
+    assert not manager._pending_acknowledgements
+    assert store.data["acknowledgements"][0]["session_id"] == new.session_id
+    await manager._async_handle_action(
+        SimpleNamespace(data={"action": new.action_token})
+    )
+    assert not manager.acknowledgements
+    assert new.task.done()
+    assert hass.bus.fired[-1][1]["session_id"] == new.session_id
+    assert [item["message"] for _, item in recorder.calls] == [
+        "old",
+        "new",
+        "clear_notification",
+    ]
+
+
+@pytest.mark.parametrize("kind", ["find_phone", "acknowledgement"])
+async def test_cancelled_stop_retires_session_metadata(resources, kind):
+    managers, _ = resources
+    recorder = Recorder()
+    if kind == "find_phone":
+        manager = FindPhoneManager(FakeHass(), recorder.send)
+        session = await manager.async_start(PHONE, options())
+        stop = asyncio.create_task(manager.async_stop(PHONE))
+    else:
+        store = FakeStore()
+        manager = NotificationManager(FakeHass(), recorder.send, store)
+        session = await manager.async_start_acknowledgement(PHONE, ack_options())
+        stop = asyncio.create_task(manager.async_stop_acknowledgement(PHONE, "door"))
+    managers.append(manager)
+    session.task.add_done_callback(lambda _task: stop.cancel())
+    with pytest.raises(asyncio.CancelledError):
+        await stop
+    assert session.task.done()
+    assert session.stop_event.is_set()
+    assert recorder.calls[-1][1]["message"] == "clear_notification"
+    if kind == "find_phone":
+        assert not manager.sessions
+        assert session.stop_complete.is_set()
+    else:
+        assert not manager.acknowledgements
+        assert not store.data["acknowledgements"]
+
+
 async def test_old_acknowledgement_click_cannot_clear_replacement(resources):
     managers, gates = resources
     gate = Gate()

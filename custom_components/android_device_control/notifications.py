@@ -557,7 +557,9 @@ class NotificationManager:
                     old.stop_event.set()
                     if old.task is not None:
                         old.task.cancel()
-                        await asyncio.gather(old.task, return_exceptions=True)
+                # Commit the dispatched token before yielding to task retirement
+                # or storage. Caller cancellation must not leave the old,
+                # stopped session owning the replacement's notification.
                 self.acknowledgements[key] = session
                 session.task = async_create_background_task(
                     self.hass,
@@ -565,6 +567,8 @@ class NotificationManager:
                     f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
                 )
                 await self._async_save()
+                if old is not None and old.task is not None:
+                    await asyncio.gather(old.task, return_exceptions=True)
             finally:
                 self._pending_acknowledgements.pop(session.action_token, None)
         return session
@@ -815,14 +819,18 @@ class NotificationManager:
         if self.acknowledgements.get(session.key) is not session:
             return False
         session.stop_event.set()
-        if session.task is not None and session.task is not asyncio.current_task():
-            session.task.cancel()
-            await asyncio.gather(session.task, return_exceptions=True)
         self._remove_acknowledgement_if_current(session)
-        if clear:
-            await self._clear(session.target, session.options.tag)
-        if save:
-            await self._async_save()
+        try:
+            if session.task is not None and session.task is not asyncio.current_task():
+                session.task.cancel()
+                await asyncio.gather(session.task, return_exceptions=True)
+        finally:
+            try:
+                if clear and not self._closing:
+                    await self._clear(session.target, session.options.tag)
+            finally:
+                if save:
+                    await self._async_save()
         return True
 
     def _prune_expired(self) -> bool:
