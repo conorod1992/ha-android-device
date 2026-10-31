@@ -45,7 +45,7 @@ class FakeHass:
         self.data = {}
         self.bus = FakeBus()
 
-    def async_create_task(self, coro, name):
+    def async_create_background_task(self, coro, name):
         return asyncio.create_task(coro, name=name)
 
 
@@ -359,7 +359,7 @@ async def test_exact_action_stops_only_matching_session(
     await manager.async_shutdown()
 
 
-async def test_unmatched_action_stops_sole_session_as_fallback(
+async def test_unmatched_action_cannot_stop_sole_session(
     caplog: pytest.LogCaptureFixture, phone: AndroidTarget
 ) -> None:
     recorder = Recorder()
@@ -372,9 +372,10 @@ async def test_unmatched_action_stops_sole_session_as_fallback(
         )
     )
 
-    assert session.stop_event.is_set()
-    assert manager.sessions == {}
-    assert "stopping the sole active session as a fallback" in caplog.text
+    assert not session.stop_event.is_set()
+    assert manager.sessions == {phone.device_id: session}
+    assert "metadata is insufficient" in caplog.text
+    await manager.async_shutdown()
 
 
 async def test_unmatched_action_is_ignored_with_multiple_sessions(

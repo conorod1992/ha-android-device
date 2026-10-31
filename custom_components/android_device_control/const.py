@@ -86,6 +86,7 @@ SERVICE_SET_BLE_MEASURED_POWER = "set_ble_measured_power"
 
 DATA_FIND_PHONE_MANAGER = "find_phone_manager"
 DATA_NOTIFICATION_MANAGER = "notification_manager"
+DATA_CONFIG_ENTRY = "config_entry"
 
 FIND_PHONE_NOTIFICATION_TAG = "android_device_control_find_phone"
 LEGACY_FIND_PHONE_NOTIFICATION_TAG = "find_phone"

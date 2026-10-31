@@ -35,7 +35,9 @@ class FakeServices:
         self.schemas[name] = schema
         self.responses[name] = supports_response
 
-    async def async_call(self, domain, service, data, *, blocking) -> None:
+    async def async_call(
+        self, domain, service, data, *, blocking, context=None
+    ) -> None:
         self.calls.append((domain, service, data, blocking))
         target = data["target"][0]
         if target in self.fail_targets:
@@ -68,7 +70,9 @@ class FakeBus:
 async def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Return a registered fake Home Assistant instance with one Android target."""
     instance = SimpleNamespace(services=FakeServices(), bus=FakeBus(), data={})
-    instance.async_create_task = lambda coro, name: asyncio.create_task(coro, name=name)
+    instance.async_create_background_task = lambda coro, name: asyncio.create_task(
+        coro, name=name
+    )
     phone = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
     monkeypatch.setattr(
         services_module,

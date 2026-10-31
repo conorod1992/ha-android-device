@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from datetime import timedelta
 from functools import partial
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import Context, HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
@@ -80,6 +82,9 @@ from .notifications import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_DISPATCH_CONTEXT: ContextVar[Context | None] = ContextVar(
+    "android_device_control_context", default=None
+)
 
 PayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 PACKAGE_ID_PATTERN = re.compile(
@@ -260,7 +265,11 @@ async def _async_send(
     service_data = dict(notify_payload)
     service_data["target"] = [target.webhook_id]
     await hass.services.async_call(
-        "notify", target.notify_service, service_data, blocking=True
+        "notify",
+        target.notify_service,
+        service_data,
+        blocking=True,
+        context=_DISPATCH_CONTEXT.get(),
     )
 
 
@@ -677,8 +686,8 @@ async def _async_check_device(hass: HomeAssistant, call: ServiceCall) -> dict[st
 def _register_find_phone_services(hass: HomeAssistant) -> None:
     """Register Find Phone actions and initialize their event manager."""
     get_find_phone_manager(hass, partial(_async_send, hass))
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_FIND_PHONE,
         partial(_async_find_phone, hass),
         schema=_schema(
@@ -708,8 +717,8 @@ def _register_find_phone_services(hass: HomeAssistant) -> None:
             }
         ),
     )
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_STOP_FIND_PHONE,
         partial(_async_stop_find_phone, hass),
         schema=_schema(
@@ -732,8 +741,8 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         vol.Optional("show_in_android_auto", default=False): cv.boolean,
         vol.Optional("confirm_delivery", default=False): cv.boolean,
     }
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_NOTIFY,
         partial(_async_notification, hass),
         schema=_schema(common_fields),
@@ -750,8 +759,8 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         vol.Optional("show_in_android_auto", default=False): cv.boolean,
         vol.Optional("confirm_delivery", default=False): cv.boolean,
     }
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_NOTIFY_URGENT,
         partial(_async_notification, hass),
         schema=_schema(urgent_fields),
@@ -790,8 +799,8 @@ def _register_notification_services(hass: HomeAssistant) -> None:
             {vol.Optional("reply_label", default="Reply"): _action_label},
         ),
     ):
-        hass.services.async_register(
-            DOMAIN,
+        _register_action(
+            hass,
             name,
             partial(_async_prompt, hass),
             schema=_schema(prompt_base | extra),
@@ -832,15 +841,15 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         (SERVICE_NOTIFY_IMAGE, image_fields),
         (SERVICE_NOTIFY_LIVE_UPDATE, live_fields),
     ):
-        hass.services.async_register(
-            DOMAIN,
+        _register_action(
+            hass,
             name,
             partial(_async_notification, hass),
             schema=_schema(fields),
             supports_response=SupportsResponse.OPTIONAL,
         )
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_NOTIFY_UNTIL_ACKNOWLEDGED,
         partial(_async_notify_until_acknowledged, hass),
         schema=_schema(
@@ -866,14 +875,38 @@ def _register_notification_services(hass: HomeAssistant) -> None:
         ),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_STOP_NOTIFY_UNTIL_ACKNOWLEDGED,
         partial(_async_stop_notify_until_acknowledged, hass),
         schema=_schema(
             {vol.Optional("tag", default=DEFAULT_ACK_NOTIFICATION_TAG): _non_empty}
         ),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+
+
+def _register_action(
+    hass: HomeAssistant,
+    name: str,
+    handler: Callable[[ServiceCall], Awaitable[Any]],
+    *,
+    schema: vol.Schema,
+    supports_response: SupportsResponse = SupportsResponse.NONE,
+) -> None:
+    """Preserve attribution for immediate sends and inherited repeat tasks."""
+
+    async def handle(call: ServiceCall) -> Any:
+        token = _DISPATCH_CONTEXT.set(call.context)
+        try:
+            return await handler(call)
+        except vol.Invalid as err:
+            raise ServiceValidationError(str(err)) from err
+        finally:
+            _DISPATCH_CONTEXT.reset(token)
+
+    hass.services.async_register(
+        DOMAIN, name, handle, schema=schema, supports_response=supports_response
     )
 
 
@@ -885,8 +918,8 @@ def _register(
     *,
     response: bool = False,
 ) -> None:
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         name,
         partial(
             _async_handle_with_response if response else _async_handle,
@@ -900,8 +933,12 @@ def _register(
     )
 
 
-def async_register_services(hass: HomeAssistant) -> None:
+def async_register_services(
+    hass: HomeAssistant, entry: ConfigEntry | None = None
+) -> None:
     """Register all friendly Android command actions."""
+    if entry is not None:
+        hass.data.setdefault(DOMAIN, {})[DATA_CONFIG_ENTRY] = entry
     _register(
         hass,
         SERVICE_SET_RINGER_MODE,
@@ -1412,8 +1449,8 @@ def _register_send_to_phone_services(hass: HomeAssistant) -> None:
         ),
         lambda data: tts_payload(data["message"], data["playback_mode"]),
     )
-    hass.services.async_register(
-        DOMAIN,
+    _register_action(
+        hass,
         SERVICE_CHECK_DEVICE,
         partial(_async_check_device, hass),
         schema=vol.Schema(
@@ -1425,7 +1462,8 @@ def _register_send_to_phone_services(hass: HomeAssistant) -> None:
 
 async def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister integration actions."""
-    await async_remove_find_phone_manager(hass)
-    await async_remove_notification_manager(hass)
     for service in list(hass.services.async_services().get(DOMAIN, {})):
         hass.services.async_remove(DOMAIN, service)
+    await async_remove_find_phone_manager(hass)
+    await async_remove_notification_manager(hass)
+    hass.data.pop(DOMAIN, None)

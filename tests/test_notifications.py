@@ -47,7 +47,7 @@ class FakeHass:
         self.data = {}
         self.bus = FakeBus()
 
-    def async_create_task(self, coro, name):
+    def async_create_background_task(self, coro, name):
         return asyncio.create_task(coro, name=name)
 
 
