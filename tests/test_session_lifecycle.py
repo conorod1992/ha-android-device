@@ -319,6 +319,55 @@ async def test_old_acknowledgement_click_cannot_clear_replacement(resources):
     assert manager.acknowledgements[new.key] is new
 
 
+@pytest.mark.parametrize("replacement_fails", [False, True])
+async def test_acknowledgement_during_initial_send_is_not_lost(
+    resources, replacement_fails
+):
+    managers, gates = resources
+    gate = Gate()
+    gates.append(gate)
+    hass = FakeHass()
+    calls = []
+
+    async def send(_target, notification):
+        if notification["message"] == "new":
+            await gate.pause()
+            if replacement_fails:
+                raise RuntimeError("replacement failed")
+        calls.append(notification["message"])
+
+    manager = NotificationManager(hass, send)
+    managers.append(manager)
+    old = await manager.async_start_acknowledgement(PHONE, ack_options(message="old"))
+    start = asyncio.create_task(
+        manager.async_start_acknowledgement(PHONE, ack_options(message="new"))
+    )
+    await gate.wait()
+    pending = next(iter(manager._pending_acknowledgements.values()))
+    action = asyncio.create_task(
+        manager._async_handle_action(
+            SimpleNamespace(data={"action": pending.action_token})
+        )
+    )
+    await asyncio.sleep(0)
+    gate.release.set()
+    if replacement_fails:
+        with pytest.raises(RuntimeError, match="replacement failed"):
+            await start
+        await action
+        assert manager.acknowledgements[old.key] is old
+        assert not old.task.done()
+        assert not hass.bus.fired
+        assert calls == ["old"]
+    else:
+        new, _ = await asyncio.wait_for(asyncio.gather(start, action), 2)
+        assert not manager.acknowledgements
+        assert new.task.done()
+        assert hass.bus.fired[-1][1]["session_id"] == new.session_id
+        assert calls == ["old", "new", "clear_notification"]
+    assert not manager._pending_acknowledgements
+
+
 async def test_expired_old_acknowledgement_cannot_clear_new_owner(resources):
     managers, _ = resources
     recorder = Recorder()

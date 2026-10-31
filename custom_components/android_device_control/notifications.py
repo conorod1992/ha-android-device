@@ -249,6 +249,7 @@ class NotificationManager:
         self.prompts: OrderedDict[str, PromptSession] = OrderedDict()
         self.confirmations: OrderedDict[str, ConfirmationSession] = OrderedDict()
         self.acknowledgements: dict[tuple[str, str], AcknowledgementSession] = {}
+        self._pending_acknowledgements: dict[str, AcknowledgementSession] = {}
         self.stale_acknowledgements: dict[str, StaleAcknowledgement] = {}
         self._ack_locks = SessionLocks()
         self._closing = False
@@ -544,23 +545,28 @@ class NotificationManager:
                 stop_event=asyncio.Event(),
                 created_at=time.time(),
             )
-            # Sending to the same Companion tag atomically replaces the phone-side
-            # notification. Do not clear the tag while retiring the old task.
-            await self._send_acknowledgement_attempt(session)
-            ensure_running(self._closing)
-            session.attempts_sent = 1
-            if old is not None:
-                old.stop_event.set()
-                if old.task is not None:
-                    old.task.cancel()
-                    await asyncio.gather(old.task, return_exceptions=True)
-            self.acknowledgements[key] = session
-            session.task = async_create_background_task(
-                self.hass,
-                self._async_repeat_acknowledgement(session),
-                f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
-            )
-            await self._async_save()
+            # An action may arrive while notify is still returning. Let that
+            # handler find this token and wait for ownership under the key lock,
+            # without retiring the old working session until dispatch succeeds.
+            self._pending_acknowledgements[session.action_token] = session
+            try:
+                await self._send_acknowledgement_attempt(session)
+                ensure_running(self._closing)
+                session.attempts_sent = 1
+                if old is not None:
+                    old.stop_event.set()
+                    if old.task is not None:
+                        old.task.cancel()
+                        await asyncio.gather(old.task, return_exceptions=True)
+                self.acknowledgements[key] = session
+                session.task = async_create_background_task(
+                    self.hass,
+                    self._async_repeat_acknowledgement(session),
+                    f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
+                )
+                await self._async_save()
+            finally:
+                self._pending_acknowledgements.pop(session.action_token, None)
         return session
 
     async def async_stop_acknowledgement(self, target: AndroidTarget, tag: str) -> bool:
@@ -608,6 +614,7 @@ class NotificationManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.acknowledgements.clear()
+        self._pending_acknowledgements.clear()
         self.prompts.clear()
         self.confirmations.clear()
         self.stale_acknowledgements.clear()
@@ -753,7 +760,7 @@ class NotificationManager:
                 for item in self.acknowledgements.values()
                 if item.action_token == token
             ),
-            None,
+            self._pending_acknowledgements.get(token),
         )
         if session is None:
             stale = self.stale_acknowledgements.pop(token, None)
