@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util.async_ import create_eager_task
 
 from custom_components.android_device_control import find_phone as find_module
 from custom_components.android_device_control import notifications as notify_module
@@ -23,6 +24,16 @@ from .test_notifications import FakeHass, FakeStore, Recorder, ack_options
 
 PHONE = AndroidTarget("phone", "Pixel", "webhook-phone", "mobile_app_phone")
 TABLET = AndroidTarget("tablet", "Tablet", "webhook-tablet", "mobile_app_tablet")
+
+
+@pytest.fixture(params=[False, True], autouse=True)
+def scheduling(request, monkeypatch):
+    if request.param:
+        monkeypatch.setattr(
+            FakeHass,
+            "async_create_background_task",
+            lambda _self, coro, name: create_eager_task(coro, name=name),
+        )
 
 
 class Gate:
@@ -164,6 +175,70 @@ async def test_unload_during_initial_dispatch_does_not_create_repeat(resources):
     assert not manager.sessions
     with pytest.raises(HomeAssistantError):
         await manager.async_start(PHONE, options())
+
+
+async def test_unload_during_replacement_cleanup_does_not_send_new_sound(resources):
+    managers, gates = resources
+    gate = Gate()
+    gates.append(gate)
+    calls = []
+
+    async def send(_target, command):
+        calls.append(command["message"])
+        if command["message"] == "clear_notification":
+            await gate.pause()
+
+    manager = FindPhoneManager(FakeHass(), send)
+    managers.append(manager)
+    await manager.async_start(PHONE, options(wake_screen=False))
+    start = asyncio.create_task(manager.async_start(PHONE, options(wake_screen=False)))
+    await gate.wait()
+    shutdown = asyncio.create_task(manager.async_shutdown())
+    await asyncio.sleep(0)
+    gate.release.set()
+    with pytest.raises(HomeAssistantError):
+        await start
+    await asyncio.wait_for(shutdown, 2)
+    assert calls == ["Finding phone", "clear_notification"]
+    assert not manager.sessions
+
+
+async def test_unload_during_prompt_send_preserves_existing_persisted_mapping(
+    resources,
+):
+    managers, gates = resources
+    gate = Gate()
+    gates.append(gate)
+
+    async def send(_target, notification):
+        if notification["message"] == "Pending":
+            await gate.pause()
+
+    store = FakeStore()
+    manager = NotificationManager(FakeHass(), send, store)
+    managers.append(manager)
+    old = await manager.async_prompt(
+        PHONE,
+        title="Question",
+        message="Existing",
+        tag=None,
+        actions=[{"id": "yes", "title": "Yes"}],
+    )
+    pending = asyncio.create_task(
+        manager.async_prompt(
+            PHONE,
+            title="Question",
+            message="Pending",
+            tag=None,
+            actions=[{"id": "yes", "title": "Yes"}],
+        )
+    )
+    await gate.wait()
+    await manager.async_shutdown()
+    gate.release.set()
+    with pytest.raises(HomeAssistantError):
+        await pending
+    assert [item["session_id"] for item in store.data["prompts"]] == [old.session_id]
 
 
 async def test_stale_tablet_action_cannot_stop_phone(monkeypatch, resources):
@@ -324,3 +399,29 @@ async def test_restored_acknowledgement_expires_during_uptime(monkeypatch, resou
     )
     assert not hass.bus.fired
     assert not store.data["acknowledgements"]
+
+
+async def test_unload_cancels_restore_and_rejects_queued_first_send(resources):
+    managers, gates = resources
+    gate = Gate()
+    gates.append(gate)
+    recorder = Recorder()
+
+    class SlowStore(FakeStore):
+        async def async_load(self):
+            await gate.pause()
+            return await super().async_load()
+
+    manager = NotificationManager(FakeHass(), recorder.send, SlowStore())
+    managers.append(manager)
+    manager.async_register()
+    await gate.wait()
+    start = asyncio.create_task(
+        manager.async_start_acknowledgement(PHONE, ack_options())
+    )
+    await asyncio.sleep(0)
+    await asyncio.wait_for(manager.async_shutdown(), 1)
+    with pytest.raises(HomeAssistantError):
+        await start
+    assert not recorder.calls
+    assert not manager.acknowledgements

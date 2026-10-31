@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine, Hashable
+from collections.abc import Awaitable, Callable, Coroutine, Hashable
+from contextvars import ContextVar
 from typing import Any
 from weakref import WeakValueDictionary
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DATA_CONFIG_ENTRY, DOMAIN
+
+DISPATCH_CONTEXT: ContextVar[Context | None] = ContextVar(
+    "android_device_control_context", default=None
+)
+
+
+def with_event_context(
+    handler: Callable[[Event], Awaitable[None]],
+) -> Callable[[Event], Awaitable[None]]:
+    """Retain the Companion event's attribution for cleanup and translated events."""
+
+    async def handle(event: Event) -> None:
+        token = DISPATCH_CONTEXT.set(event.context)
+        try:
+            await handler(event)
+        finally:
+            DISPATCH_CONTEXT.reset(token)
+
+    return handle
 
 
 class SessionLocks:

@@ -40,7 +40,12 @@ from .device import (
     AndroidTarget,
     resolve_android_targets,
 )
-from .runtime import SessionLocks, async_create_background_task, ensure_running
+from .runtime import (
+    SessionLocks,
+    async_create_background_task,
+    ensure_running,
+    with_event_context,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,13 +122,13 @@ class FindPhoneManager:
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_ACTION,
-                self._async_handle_notification_action,
+                with_event_context(self._async_handle_notification_action),
             )
         )
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_ANDROID_INTENT_RECEIVED,
-                self._async_handle_android_intent,
+                with_event_context(self._async_handle_android_intent),
             )
         )
         self._unsubscribers.append(
@@ -148,6 +153,7 @@ class FindPhoneManager:
         old_session = self.sessions.get(target.device_id)
         if old_session is not None:
             await self._async_stop_locked(old_session, cleanup=True)
+        ensure_running(self._closing)
 
         session = FindPhoneSession(
             device_id=target.device_id,
@@ -304,7 +310,7 @@ class FindPhoneManager:
         dispatched = 0
         sound_dispatched = False
         for command in commands:
-            if session.stop_event.is_set():
+            if self._closing or session.stop_event.is_set():
                 return dispatched, sound_dispatched
             try:
                 await self._send_command(session.target, command)
@@ -416,7 +422,7 @@ class FindPhoneManager:
         session.keyguard_unsubscribe = async_track_state_change_event(
             self.hass,
             [entity_id],
-            partial(self._async_handle_keyguard_state, session),
+            with_event_context(partial(self._async_handle_keyguard_state, session)),
         )
 
     @staticmethod
@@ -485,6 +491,8 @@ class FindPhoneManager:
         if turn_off_flashlight:
             commands.append(payload("command_flashlight", {"command": "turn_off"}))
         for command in commands:
+            if self._closing:
+                return
             try:
                 await self._send_command(target, command)
             except Exception:  # noqa: BLE001 - cleanup commands are independent

@@ -115,6 +115,51 @@ async def test_real_service_validation_rejects_before_dispatch(server):
     assert not calls
 
 
+async def test_repeat_retains_initiating_context_after_service_returns(server):
+    hass, calls = server
+    await async_setup_entry(hass, entry())
+    context = Context(user_id="repeat-initiator")
+    await hass.services.async_call(
+        DOMAIN,
+        "find_phone",
+        {
+            "device_id": "phone",
+            "stop_when_unlocked": False,
+            "wake_screen": False,
+            "repeat_interval": {"seconds": 3},
+            "max_attempts": 2,
+        },
+        blocking=True,
+        context=context,
+    )
+    repeated = asyncio.Event()
+
+    async def capture(call):
+        calls.append(call)
+        repeated.set()
+
+    hass.services.async_register("notify", PHONE.notify_service, capture)
+    unrelated = Context(user_id="another-user")
+    await hass.services.async_call(
+        DOMAIN,
+        "set_ringer_mode",
+        {"device_id": "phone", "mode": "normal"},
+        blocking=True,
+        context=unrelated,
+    )
+    repeated.clear()
+    await asyncio.wait_for(repeated.wait(), 5)
+    sounds = [call for call in calls if call.data["message"] == "Finding phone"]
+    assert len(sounds) == 2
+    assert all(call.context is context for call in sounds)
+    assert (
+        next(
+            call for call in calls if call.data["message"] == "command_ringer_mode"
+        ).context
+        is unrelated
+    )
+
+
 async def test_prompt_survives_real_storage_and_entry_reload(server, tmp_path):
     hass, calls = server
     config_entry = entry()
@@ -137,10 +182,14 @@ async def test_prompt_survives_real_storage_and_entry_reload(server, tmp_path):
     await manager._async_ensure_loaded()
     events = []
     unsubscribe = hass.bus.async_listen(EVENT_NOTIFICATION_ACTION, events.append)
-    hass.bus.async_fire(EVENT_MOBILE_APP_NOTIFICATION_ACTION, {"action": token})
+    context = Context()
+    hass.bus.async_fire(
+        EVENT_MOBILE_APP_NOTIFICATION_ACTION, {"action": token}, context=context
+    )
     await asyncio.wait_for(hass.async_block_till_done(), 1)
     unsubscribe()
     assert len(events) == 1
     assert events[0].data["session_id"] == response["devices"][0]["session_id"]
     assert events[0].data["action_id"] == "yes"
     assert events[0].data["device_id"] == PHONE.device_id
+    assert events[0].context is context

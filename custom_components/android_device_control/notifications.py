@@ -32,7 +32,13 @@ from .const import (
     NOTIFICATION_CONFIRMATION_KEY,
 )
 from .device import AndroidTarget
-from .runtime import SessionLocks, async_create_background_task, ensure_running
+from .runtime import (
+    DISPATCH_CONTEXT,
+    SessionLocks,
+    async_create_background_task,
+    ensure_running,
+    with_event_context,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -256,13 +262,13 @@ class NotificationManager:
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_ACTION,
-                self._async_handle_action,
+                with_event_context(self._async_handle_action),
             )
         )
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
-                self._async_handle_received,
+                with_event_context(self._async_handle_received),
             )
         )
         self._unsubscribers.append(
@@ -280,9 +286,11 @@ class NotificationManager:
 
     async def _async_ensure_loaded(self) -> None:
         """Restore bounded metadata once and reconcile managed notifications."""
+        ensure_running(self._closing)
         if self._loaded:
             return
         async with self._load_lock:
+            ensure_running(self._closing)
             if self._loaded:
                 return
             raw: dict[str, Any] | None = None
@@ -294,6 +302,7 @@ class NotificationManager:
                 _LOGGER.warning(
                     "Could not load notification session metadata", exc_info=True
                 )
+            ensure_running(self._closing)
             if isinstance(raw, dict):
                 self._restore(raw)
             await self._async_reconcile_stale_acknowledgements()
@@ -390,7 +399,7 @@ class NotificationManager:
     async def _async_save(self) -> None:
         """Persist the bounded metadata needed to recognize existing actions."""
         self._prune_expired()
-        if self._store is None or not self._loaded:
+        if self._closing or self._store is None or not self._loaded:
             return
         acknowledgements = (
             [_ack_to_dict(session) for session in self.acknowledgements.values()]
@@ -460,11 +469,13 @@ class NotificationManager:
             self._add_confirmation(session_id, target, tag)
             await self._async_save()
         try:
+            ensure_running(self._closing)
             await self._send(
                 target,
                 {"title": title, "message": message, "data": notification_data},
             )
-        except Exception:
+            ensure_running(self._closing)
+        except (Exception, asyncio.CancelledError):
             self.prompts.pop(session_id, None)
             self.confirmations.pop(session_id, None)
             await self._async_save()
@@ -494,8 +505,10 @@ class NotificationManager:
         correlated_payload["data"] = notification_data
         await self._async_save()
         try:
+            ensure_running(self._closing)
             await self._send(target, correlated_payload)
-        except Exception:
+            ensure_running(self._closing)
+        except (Exception, asyncio.CancelledError):
             self.confirmations.pop(session_id, None)
             await self._async_save()
             raise
@@ -581,6 +594,8 @@ class NotificationManager:
         ):
             self._restore_task.cancel()
             await asyncio.gather(self._restore_task, return_exceptions=True)
+        async with self._load_lock:
+            pass
         for lock in self._ack_locks.active():
             async with lock:
                 pass
@@ -706,6 +721,7 @@ class NotificationManager:
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACTION,
             event_data,
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_handle_received(self, event: Event) -> None:
@@ -727,6 +743,7 @@ class NotificationManager:
                 "tag": session.tag,
                 "session_id": session.session_id,
             },
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_handle_acknowledgement(self, token: str) -> None:
@@ -752,6 +769,7 @@ class NotificationManager:
                     "attempts": stale.attempts_sent,
                     "reconciled_after_restart": True,
                 },
+                context=DISPATCH_CONTEXT.get(),
             )
             return
         if not await self._async_stop_acknowledgement(session, clear=True):
@@ -764,6 +782,7 @@ class NotificationManager:
                 "tag": session.options.tag,
                 "attempts": session.attempts_sent,
             },
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_stop_acknowledgement(

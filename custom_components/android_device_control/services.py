@@ -6,14 +6,13 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
 from datetime import timedelta
 from functools import partial
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Context, HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
@@ -80,11 +79,9 @@ from .notifications import (
     progress_notification_payload,
     validate_actions,
 )
+from .runtime import DISPATCH_CONTEXT
 
 _LOGGER = logging.getLogger(__name__)
-_DISPATCH_CONTEXT: ContextVar[Context | None] = ContextVar(
-    "android_device_control_context", default=None
-)
 
 PayloadBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 PACKAGE_ID_PATTERN = re.compile(
@@ -269,7 +266,7 @@ async def _async_send(
         target.notify_service,
         service_data,
         blocking=True,
-        context=_DISPATCH_CONTEXT.get(),
+        context=DISPATCH_CONTEXT.get(),
     )
 
 
@@ -897,7 +894,7 @@ def _register_action(
     """Preserve attribution for immediate sends and inherited repeat tasks."""
 
     async def handle(call: ServiceCall) -> Any:
-        token = _DISPATCH_CONTEXT.set(call.context)
+        token = DISPATCH_CONTEXT.set(call.context)
         try:
             if name.startswith("kiosk_"):
                 raise ServiceValidationError(
@@ -908,7 +905,7 @@ def _register_action(
         except vol.Invalid as err:
             raise ServiceValidationError(str(err)) from err
         finally:
-            _DISPATCH_CONTEXT.reset(token)
+            DISPATCH_CONTEXT.reset(token)
 
     hass.services.async_register(
         DOMAIN, name, handle, schema=schema, supports_response=supports_response
