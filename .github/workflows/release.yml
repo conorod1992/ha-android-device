@@ -28,8 +28,14 @@ jobs:
     permissions:
       contents: read
 
+  android-e2e:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/android-e2e.yml
+    permissions:
+      contents: read
+
   release:
-    needs: [test, validate]
+    needs: [test, validate, android-e2e]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

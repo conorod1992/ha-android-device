@@ -5,6 +5,7 @@ No transport, device resolver, event, or Companion receiver is mocked.
 """
 
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -47,6 +48,7 @@ class Server:
         self.ws.send(json.dumps({"type": "auth", "access_token": token}))
         assert json.loads(self.ws.recv())["type"] == "auth_ok"
         self.counter = 0
+        self.events = []
 
     def api(self, path, data=None):
         response = self.http.request(
@@ -60,6 +62,8 @@ class Server:
         self.ws.send(json.dumps({"id": self.counter, "type": kind, **data}))
         while True:
             message = json.loads(self.ws.recv())
+            if message.get("type") == "event":
+                self.events.append(message)
             if message.get("id") == self.counter:
                 assert message.get("success"), message
                 return message.get("result")
@@ -71,13 +75,13 @@ class Server:
             service=service,
             service_data={"device_id": self.device, **data},
             return_response=service.startswith("ask_")
-            or service == "notify_until_acknowledged",
+            or service in {"notify", "notify_until_acknowledged"},
         )
 
     def event(self, event_type, session_id):
         end = time.monotonic() + 30
         while time.monotonic() < end:
-            message = json.loads(self.ws.recv())
+            message = self.events.pop(0) if self.events else json.loads(self.ws.recv())
             event = message.get("event", {})
             if (
                 event.get("event_type") == event_type
@@ -257,8 +261,8 @@ def test_progress_and_clear(environment):
     )
     eventually(lambda: visible("E2E progress"))
     dump = notifications()
-    assert "android.progress=3" in dump
-    assert "android.progressMax=10" in dump
+    assert re.search(r"android.progress=(?:Integer \()?3(?:\)|\s)", dump)
+    assert re.search(r"android.progressMax=(?:Integer \()?10(?:\)|\s)", dump)
     server.call(
         "notify_progress",
         title="E2E progress",
@@ -266,7 +270,11 @@ def test_progress_and_clear(environment):
         tag="e2e-progress",
         indeterminate=True,
     )
-    eventually(lambda: "android.progressIndeterminate=true" in notifications())
+    eventually(
+        lambda: re.search(
+            r"android.progressIndeterminate=(?:Boolean \()?true", notifications()
+        )
+    )
     phone.open_notification()
     phone.screenshot(str(ARTIFACTS / "progress.png"))
     server.call("clear_notification", tag="e2e-progress")
@@ -336,3 +344,38 @@ def test_find_phone_stop_button(environment):
     eventually(lambda: not visible("Finding phone"))
     time.sleep(7)
     assert not visible("Finding phone")
+
+
+def test_text_reply_returns_actual_input(environment):
+    server, phone = environment
+    result = server.call(
+        "ask_text",
+        title="E2E text",
+        message="Reply here",
+        tag="e2e-text",
+        reply_label="E2E Reply",
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    eventually(lambda: visible("E2E text"))
+    click_action(phone, "E2E Reply")
+    phone(className="android.widget.EditText").set_text("Reply from Android")
+    phone(resourceId="com.android.systemui:id/remote_input_send").click(timeout=10)
+    event = server.event("android_device_control_notification_action", session)
+    assert event["action_id"] == "reply"
+    assert event["response_text"] == "Reply from Android"
+
+
+def test_delivery_receipt_comes_from_companion(environment):
+    server, _phone = environment
+    result = server.call(
+        "notify",
+        title="E2E receipt",
+        message="Confirm local receipt",
+        tag="e2e-receipt",
+        confirm_delivery=True,
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    event = server.event("android_device_control_notification_received", session)
+    assert event["device_id"] == server.device
+    eventually(lambda: visible("E2E receipt"))
+    server.call("clear_notification", tag="e2e-receipt")
