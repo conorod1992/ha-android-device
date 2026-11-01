@@ -91,6 +91,45 @@ class Server:
         raise AssertionError("Companion did not return the expected session event")
 
 
+def dismiss_launcher_dialog(phone, xml):
+    if "Home Assistant isn" in xml and "responding" in xml:
+        raise AssertionError("Companion stopped responding during onboarding")
+    if "Pixel Launcher isn" not in xml or "responding" not in xml:
+        return False
+    # Dismiss only the emulator's first-boot launcher ANR, never Companion's.
+    phone(text="Close app").click(timeout=5)
+    phone.app_start(PACKAGE)
+    return True
+
+
+def advance_onboarding(phone, xml, password):
+    edits = phone(className="android.widget.EditText")
+    if edits.count >= 2:
+        edits[0].set_text("emulator")
+        edits[1].set_text(password)
+        phone(textMatches="(?i)log in|sign in").click_exists(timeout=2)
+    elif "name this device" in xml:
+        edits[0].set_text("CI Android")
+        phone(text="Save").click_exists(timeout=2)
+    elif "address?" in xml and edits.count:
+        edits[0].set_text("http://10.0.2.2:8123")
+        phone(text="Connect").click_exists(timeout=2)
+    else:
+        for label in (
+            "Connect to my",
+            "Enter address manually",
+            "Less secure:",
+            "Got it",
+            "Allow notifications",
+            "Allow",
+            "Next",
+            "Continue",
+            "Finish",
+        ):
+            if phone(textStartsWith=label).click_exists(timeout=0.2):
+                break
+
+
 def onboard_phone(phone, password):
     """Drive the pinned APK's ordinary onboarding, including its real login UI."""
     phone.app_start(PACKAGE)
@@ -107,39 +146,9 @@ def onboard_phone(phone, password):
                 phone.screenshot(str(ARTIFACTS / f"onboarding-{screens:02}.png"))
                 screens += 1
             previous = xml
-        if "Pixel Launcher isn" in xml and "responding" in xml:
-            # The emulator launcher can ANR during first boot. It is not the
-            # application under test; dismiss only this specific system dialog.
-            phone(text="Close app").click(timeout=5)
-            phone.app_start(PACKAGE)
+        if dismiss_launcher_dialog(phone, xml):
             continue
-        if "Home Assistant isn" in xml and "responding" in xml:
-            raise AssertionError("Companion stopped responding during onboarding")
-        edits = phone(className="android.widget.EditText")
-        if edits.count >= 2:
-            edits[0].set_text("emulator")
-            edits[1].set_text(password)
-            phone(textMatches="(?i)log in|sign in").click_exists(timeout=2)
-        elif "name this device" in xml:
-            edits[0].set_text("CI Android")
-            phone(text="Save").click_exists(timeout=2)
-        elif "address?" in xml and edits.count:
-            edits[0].set_text("http://10.0.2.2:8123")
-            phone(text="Connect").click_exists(timeout=2)
-        else:
-            for label in (
-                "Connect to my",
-                "Enter address manually",
-                "Less secure:",
-                "Got it",
-                "Allow notifications",
-                "Allow",
-                "Next",
-                "Continue",
-                "Finish",
-            ):
-                if phone(textStartsWith=label).click_exists(timeout=0.2):
-                    break
+        advance_onboarding(phone, xml, password)
         # Registration is only half of onboarding: finish the security choice
         # before moving the app into the background.
         if "io.homeassistant.companion.android.webview" in xml or "Overview" in xml:
@@ -188,7 +197,7 @@ def environment(tmp_path_factory):
 
         eventually(ready, timeout=240)
         password = secrets.token_urlsafe(24)
-        print(f"::add-mask::{password}", flush=True)
+        print(f"::add-mask::{password}", flush=True)  # noqa: T201 - Actions masking command
         response = requests.post(
             URL + "/api/onboarding/users",
             json={
@@ -212,7 +221,7 @@ def environment(tmp_path_factory):
         )
         response.raise_for_status()
         token = response.json()["access_token"]
-        print(f"::add-mask::{token}", flush=True)
+        print(f"::add-mask::{token}", flush=True)  # noqa: T201 - Actions masking command
         server = Server(token)
         for step in ("core_config", "analytics"):
             server.api("/api/onboarding/" + step, {})
