@@ -970,7 +970,8 @@ The repository also runs HACS validation and hassfest in GitHub Actions.
 
 Tests run against both the minimum and current stable Home Assistant, with a weekly
 compatibility run between code changes. The Release workflow runs those checks plus
-HACS/hassfest before publishing. Tests initialize Home Assistant before importing its
+HACS/hassfest and the [Android emulator end-to-end suite](e2e/android/README.md)
+before publishing. Tests initialize Home Assistant before importing its
 validation library, matching server startup on current versions.
 
 Implementation and protocol behaviour are based on:

@@ -1,7 +1,7 @@
 # Releasing
 
 The Release workflow first runs minimum/current Home Assistant tests, lint, formatting,
-HACS validation, and hassfest against the workflow's source commit. A failed check
+HACS validation, hassfest, and the real Companion Android emulator suite against the workflow's source commit. A failed check
 prevents the version commit, tag, and release. If main changes during validation,
 the workflow refuses to publish; rerun it from current main.
 

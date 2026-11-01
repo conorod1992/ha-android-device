@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   companion:
-    name: Companion Android 35
+    name: Companion (Android 15 / API 35)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:

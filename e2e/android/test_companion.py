@@ -324,18 +324,37 @@ def capture_case(environment, request):
 def notifications():
     dump = adb("shell", "dumpsys", "notification", "--noredact")
     active = dump.split("Notification List:", 1)[1]
-    return active.split("Ranking Config:", 1)[0].split("Snoozed Notification List:", 1)[
-        0
-    ]
+    for boundary in (
+        "mArchive=",
+        "Ranking Config:",
+        "Snoozed Notification List:",
+        "Enqueued Notification List:",
+    ):
+        active = active.split(boundary, 1)[0]
+    return active
+
+
+def notification_record(title):
+    return next(
+        (
+            record
+            for record in notifications().split("NotificationRecord(")
+            if re.search(rf"android\.title=\w+ \({re.escape(title)}\)", record)
+        ),
+        "",
+    )
 
 
 def visible(title):
-    return title in notifications()
+    return bool(notification_record(title))
 
 
 def click_action(phone, label):
     phone.open_notification()
-    phone(text=label).click(timeout=15)
+    button = phone(text=label)
+    assert button.wait(timeout=15)
+    phone.screenshot(str(ARTIFACTS / (re.sub(r"\W+", "-", label) + "-action.png")))
+    button.click()
 
 
 def test_progress_and_clear(environment):
@@ -349,7 +368,7 @@ def test_progress_and_clear(environment):
         maximum=10,
     )
     eventually(lambda: visible("E2E progress"))
-    dump = notifications()
+    dump = notification_record("E2E progress")
     assert re.search(r"android.progress=(?:Integer \()?3(?:\)|\s)", dump)
     assert re.search(r"android.progressMax=(?:Integer \()?10(?:\)|\s)", dump)
     server.call(
@@ -361,10 +380,12 @@ def test_progress_and_clear(environment):
     )
     eventually(
         lambda: re.search(
-            r"android.progressIndeterminate=(?:Boolean \()?true", notifications()
+            r"android.progressIndeterminate=(?:Boolean \()?true",
+            notification_record("E2E progress"),
         )
     )
     phone.open_notification()
+    assert phone(text="E2E progress").wait(timeout=10)
     phone.screenshot(str(ARTIFACTS / "progress.png"))
     server.call("clear_notification", tag="e2e-progress")
     eventually(lambda: not visible("E2E progress"))
@@ -428,11 +449,11 @@ def test_find_phone_stop_button(environment):
         max_attempts=100,
         repeat_interval={"seconds": 3},
     )
-    eventually(lambda: visible("Finding phone"))
+    eventually(lambda: visible("Find Phone"))
     click_action(phone, "Stop ringing")
-    eventually(lambda: not visible("Finding phone"))
+    eventually(lambda: not visible("Find Phone"))
     time.sleep(7)
-    assert not visible("Finding phone")
+    assert not visible("Find Phone")
 
 
 def test_text_reply_returns_actual_input(environment):

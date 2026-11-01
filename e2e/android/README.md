@@ -3,11 +3,14 @@
 The Android end-to-end workflow runs for pull requests and can be run manually.
 The Release workflow also requires it to pass before publishing.
 
-It boots an Android 35 x86_64 emulator and installs the official **2026.10.1
+It boots an Android 15 (API 35) x86_64 emulator and installs the official **2026.10.1
 minimal Companion APK**, verified against its published SHA-256 digest. A fresh official Home Assistant **2026.7.2** container loads this checkout's custom integration. The tests create
 a disposable owner account, onboard Companion through its UI, and use its real
 Mobile App registration and persistent WebSocket connection for local push.
 No personal credentials, Firebase project, or externally reachable server is needed.
+The emulator grants notification permission and unrestricted background access.
+After registration, the app resumes and a real notification handshake verifies that
+its local push worker is connected before the test cases begin.
 
 The tests verify:
 
