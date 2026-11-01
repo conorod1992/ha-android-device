@@ -10,12 +10,15 @@ import secrets
 import shutil
 import subprocess
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 import requests
 import uiautomator2 as u2
 import websocket
+
+from .runtime import home_assistant_runtime, session_event, websocket_command
 
 PACKAGE = "io.homeassistant.companion.android.minimal"
 URL = "http://127.0.0.1:8123"
@@ -59,14 +62,9 @@ class Server:
 
     def command(self, kind, **data):
         self.counter += 1
-        self.ws.send(json.dumps({"id": self.counter, "type": kind, **data}))
-        while True:
-            message = json.loads(self.ws.recv())
-            if message.get("type") == "event":
-                self.events.append(message)
-            if message.get("id") == self.counter:
-                assert message.get("success"), message
-                return message.get("result")
+        return websocket_command(
+            self.ws, {"id": self.counter, "type": kind, **data}, self.events
+        )
 
     def call(self, service, **data):
         return self.command(
@@ -79,16 +77,7 @@ class Server:
         )
 
     def event(self, event_type, session_id):
-        end = time.monotonic() + 30
-        while time.monotonic() < end:
-            message = self.events.pop(0) if self.events else json.loads(self.ws.recv())
-            event = message.get("event", {})
-            if (
-                event.get("event_type") == event_type
-                and event["data"].get("session_id") == session_id
-            ):
-                return event["data"]
-        raise AssertionError("Companion did not return the expected session event")
+        return session_event(self.ws, self.events, event_type, session_id)
 
 
 def dismiss_launcher_dialog(phone, xml):
@@ -210,94 +199,75 @@ def environment(tmp_path_factory):
         "homeassistant:\n  name: Emulator CI\n  time_zone: UTC\n"
         "http:\napi:\nfrontend:\nconfig:\nmobile_app:\nlovelace:\nperson:\nonboarding:\n"
     )
-    log = (ARTIFACTS / "home-assistant.log").open("w")
-    process = subprocess.Popen(  # noqa: S603 - disposable local HA process
-        [
-            shutil.which("docker"),
-            "run",
-            "--rm",
-            "--network",
-            "host",
-            "--name",
-            "ha-android-e2e",
-            "--volume",
-            f"{config}:/config",
-            "ghcr.io/home-assistant/home-assistant:2026.7.2",
-        ],
-        stdout=log,
-        stderr=log,
-    )
-    phone = None
-    server = None
-    try:
+    with (
+        home_assistant_runtime(config, ARTIFACTS / "home-assistant.log"),
+        ExitStack() as resources,
+    ):
+        phone = None
+        try:
 
-        def ready():
-            try:
-                return (
-                    requests.get(URL + "/api/onboarding", timeout=3).status_code == 200
-                )
-            except requests.ConnectionError:
-                return False
+            def ready():
+                try:
+                    return (
+                        requests.get(URL + "/api/onboarding", timeout=3).status_code
+                        == 200
+                    )
+                except requests.ConnectionError:
+                    return False
 
-        eventually(ready, timeout=240)
-        password = secrets.token_urlsafe(24)
-        print(f"::add-mask::{password}", flush=True)  # noqa: T201 - Actions masking command
-        response = requests.post(
-            URL + "/api/onboarding/users",
-            json={
-                "name": "Emulator",
-                "username": "emulator",
-                "password": password,
-                "client_id": URL + "/",
-                "language": "en",
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        response = requests.post(
-            URL + "/auth/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": response.json()["auth_code"],
-                "client_id": URL + "/",
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        token = response.json()["access_token"]
-        print(f"::add-mask::{token}", flush=True)  # noqa: T201 - Actions masking command
-        server = Server(token)
-        for step in ("core_config", "analytics"):
-            server.api("/api/onboarding/" + step, {})
-        server.api(
-            "/api/onboarding/integration",
-            {"client_id": URL + "/", "redirect_uri": URL + "/"},
-        )
-        adb("logcat", "-G", "16M")
-        adb("install", "-r", "companion.apk")
-        adb("shell", "dumpsys", "deviceidle", "whitelist", "+" + PACKAGE)
-        adb("shell", "pm", "grant", PACKAGE, "android.permission.POST_NOTIFICATIONS")
-        phone = u2.connect()
-        connect_phone(server, phone, password)
-        yield server, phone
-    finally:
-        if phone:
-            phone.screenshot(str(ARTIFACTS / "final.png"))
-            (ARTIFACTS / "final.xml").write_text(phone.dump_hierarchy())
-        (ARTIFACTS / "logcat.txt").write_text(adb("logcat", "-d", "-t", "30000"))
-        (ARTIFACTS / "notifications.txt").write_text(
-            adb("shell", "dumpsys", "notification", "--noredact")
-        )
-        if server:
-            server.ws.close()
-        subprocess.run(  # noqa: S603 - fixed disposable container name
-            [shutil.which("docker"), "stop", "--time", "15", "ha-android-e2e"],
-            check=False,
-            timeout=30,
-            capture_output=True,
-        )
-        process.wait(timeout=30)
-        log.close()
+            eventually(ready, timeout=240)
+            password = secrets.token_urlsafe(24)
+            print(f"::add-mask::{password}", flush=True)  # noqa: T201 - Actions masking command
+            response = requests.post(
+                URL + "/api/onboarding/users",
+                json={
+                    "name": "Emulator",
+                    "username": "emulator",
+                    "password": password,
+                    "client_id": URL + "/",
+                    "language": "en",
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            response = requests.post(
+                URL + "/auth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": response.json()["auth_code"],
+                    "client_id": URL + "/",
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            token = response.json()["access_token"]
+            print(f"::add-mask::{token}", flush=True)  # noqa: T201 - Actions masking command
+            server = Server(token)
+            resources.callback(server.http.close)
+            resources.callback(server.ws.close)
+            for step in ("core_config", "analytics"):
+                server.api("/api/onboarding/" + step, {})
+            server.api(
+                "/api/onboarding/integration",
+                {"client_id": URL + "/", "redirect_uri": URL + "/"},
+            )
+            adb("logcat", "-G", "16M")
+            adb("install", "-r", "companion.apk")
+            adb("shell", "dumpsys", "deviceidle", "whitelist", "+" + PACKAGE)
+            adb(
+                "shell", "pm", "grant", PACKAGE, "android.permission.POST_NOTIFICATIONS"
+            )
+            phone = u2.connect()
+            connect_phone(server, phone, password)
+            yield server, phone
+        finally:
+            if phone:
+                phone.screenshot(str(ARTIFACTS / "final.png"))
+                (ARTIFACTS / "final.xml").write_text(phone.dump_hierarchy())
+            (ARTIFACTS / "logcat.txt").write_text(adb("logcat", "-d", "-t", "30000"))
+            (ARTIFACTS / "notifications.txt").write_text(
+                adb("shell", "dumpsys", "notification", "--noredact")
+            )
 
 
 def local_push_ready(server):

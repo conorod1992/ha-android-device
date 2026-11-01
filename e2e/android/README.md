@@ -27,6 +27,9 @@ do not inject simulated broadcasts or call Companion's internal receiver directl
 The workflow uploads JUnit results, notification records, logcat, a final screenshot,
 and UI hierarchy. The progress test also captures its notification shade.
 
+The normal unit suite also checks harness failure paths: container cleanup after
+diagnostic failures, occupied-port refusal, and WebSocket correlation and deadlines.
+
 To reproduce locally on Linux with a disposable emulator already running:
 
 ```sh
