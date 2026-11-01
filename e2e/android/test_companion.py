@@ -114,11 +114,13 @@ def advance_onboarding(phone, xml, password):
     elif "address?" in xml and edits.count:
         edits[0].set_text("http://10.0.2.2:8123")
         phone(text="Connect").click_exists(timeout=2)
+    elif "Less secure:" in xml:
+        phone(textStartsWith="Less secure:").click(timeout=5)
+        phone(text="Next").click(timeout=5)
     else:
         for label in (
             "Connect to my",
             "Enter address manually",
-            "Less secure:",
             "Got it",
             "Allow notifications",
             "Allow",
@@ -276,6 +278,15 @@ def environment(tmp_path_factory):
         log.close()
 
 
+@pytest.fixture(autouse=True)
+def capture_case(environment, request):
+    yield
+    _server, phone = environment
+    phone.screenshot(str(ARTIFACTS / f"{request.node.name}.png"))
+    (ARTIFACTS / f"{request.node.name}.xml").write_text(phone.dump_hierarchy())
+    (ARTIFACTS / f"{request.node.name}-notifications.txt").write_text(notifications())
+
+
 def notifications():
     dump = adb("shell", "dumpsys", "notification", "--noredact")
     active = dump.split("Notification List:", 1)[1]
@@ -380,7 +391,7 @@ def test_find_phone_stop_button(environment):
         "find_phone",
         wake_screen=False,
         stop_when_unlocked=False,
-        max_attempts=5,
+        max_attempts=100,
         repeat_interval={"seconds": 3},
     )
     eventually(lambda: visible("Finding phone"))
