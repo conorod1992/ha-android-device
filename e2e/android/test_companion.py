@@ -170,6 +170,37 @@ def onboard_phone(phone, password):
     raise AssertionError("Companion onboarding did not complete; see onboarding.xml")
 
 
+def connect_phone(server, phone, password):
+    onboard_phone(phone, password)
+    entries = eventually(
+        lambda: [
+            e
+            for e in server.api("/api/config/config_entries/entry")
+            if e["domain"] == "mobile_app"
+        ]
+    )
+    devices = server.command("config/device_registry/list")
+    server.device = next(
+        d["id"] for d in devices if entries[0]["entry_id"] in d["config_entries"]
+    )
+    flow = server.api(
+        "/api/config/config_entries/flow",
+        {"handler": DOMAIN, "show_advanced_options": False},
+    )
+    result = server.api("/api/config/config_entries/flow/" + flow["flow_id"], {})
+    assert result["type"] == "create_entry", result
+    eventually(lambda: any(s["domain"] == DOMAIN for s in server.api("/api/services")))
+    server.command("subscribe_events")
+    # Resume after registration so Companion schedules its local-push worker
+    # with the newly added server (the initial resume had no server yet).
+    phone.press("home")
+    phone.app_start(PACKAGE)
+    eventually(lambda: local_push_ready(server), timeout=60)
+    eventually(lambda: visible("E2E connection check"))
+    server.call("clear_notification", tag="e2e-ready")
+    phone.press("home")
+
+
 @pytest.fixture(scope="module")
 def environment(tmp_path_factory):
     ARTIFACTS.mkdir(exist_ok=True)
@@ -242,38 +273,18 @@ def environment(tmp_path_factory):
             "/api/onboarding/integration",
             {"client_id": URL + "/", "redirect_uri": URL + "/"},
         )
+        adb("logcat", "-G", "16M")
         adb("install", "-r", "companion.apk")
+        adb("shell", "dumpsys", "deviceidle", "whitelist", "+" + PACKAGE)
         adb("shell", "pm", "grant", PACKAGE, "android.permission.POST_NOTIFICATIONS")
         phone = u2.connect()
-        onboard_phone(phone, password)
-        entries = eventually(
-            lambda: [
-                e
-                for e in server.api("/api/config/config_entries/entry")
-                if e["domain"] == "mobile_app"
-            ]
-        )
-        devices = server.command("config/device_registry/list")
-        server.device = next(
-            d["id"] for d in devices if entries[0]["entry_id"] in d["config_entries"]
-        )
-        flow = server.api(
-            "/api/config/config_entries/flow",
-            {"handler": DOMAIN, "show_advanced_options": False},
-        )
-        result = server.api("/api/config/config_entries/flow/" + flow["flow_id"], {})
-        assert result["type"] == "create_entry", result
-        eventually(
-            lambda: any(s["domain"] == DOMAIN for s in server.api("/api/services"))
-        )
-        server.command("subscribe_events")
-        phone.press("home")
+        connect_phone(server, phone, password)
         yield server, phone
     finally:
         if phone:
             phone.screenshot(str(ARTIFACTS / "final.png"))
             (ARTIFACTS / "final.xml").write_text(phone.dump_hierarchy())
-        (ARTIFACTS / "logcat.txt").write_text(adb("logcat", "-d", "-t", "3000"))
+        (ARTIFACTS / "logcat.txt").write_text(adb("logcat", "-d", "-t", "30000"))
         (ARTIFACTS / "notifications.txt").write_text(
             adb("shell", "dumpsys", "notification", "--noredact")
         )
@@ -287,6 +298,18 @@ def environment(tmp_path_factory):
         )
         process.wait(timeout=30)
         log.close()
+
+
+def local_push_ready(server):
+    try:
+        server.call(
+            "notify", title="E2E connection check", message="Ready", tag="e2e-ready"
+        )
+    except AssertionError as error:
+        if "not connected to local push notifications" in str(error):
+            return False
+        raise
+    return True
 
 
 @pytest.fixture(autouse=True)
