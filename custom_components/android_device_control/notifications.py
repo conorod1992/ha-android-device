@@ -273,7 +273,7 @@ class NotificationManager:
             )
         )
         self._unsubscribers.append(
-            self.hass.bus.async_listen_once(
+            self.hass.bus.async_listen(
                 EVENT_HOMEASSISTANT_STOP,
                 self._async_handle_hass_stop,
             )

@@ -7,6 +7,7 @@ from types import MappingProxyType
 import pytest
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Context, HomeAssistant
 
 from custom_components.android_device_control import (
@@ -26,6 +27,18 @@ from custom_components.android_device_control.notifications import STORE_KEY
 from custom_components.android_device_control.services import async_unregister_services
 
 PHONE = AndroidTarget("phone", "Pixel", "webhook-phone", "mobile_app_phone")
+
+
+async def test_stop_event_retires_listeners_without_double_unsubscribe(server, caplog):
+    hass, calls = server
+    await async_setup_entry(hass, entry())
+    manager = hass.data[DOMAIN][DATA_NOTIFICATION_MANAGER]
+    await manager._async_ensure_loaded()
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await asyncio.wait_for(hass.async_block_till_done(), 1)
+    assert "Unable to remove unknown job listener" not in caplog.text
+    assert EVENT_HOMEASSISTANT_STOP not in hass.bus.async_listeners()
+    assert not calls
 
 
 def entry():
