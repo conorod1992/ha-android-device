@@ -114,9 +114,12 @@ def advance_onboarding(phone, xml, password):
     elif "address?" in xml and edits.count:
         edits[0].set_text("http://10.0.2.2:8123")
         phone(text="Connect").click_exists(timeout=2)
+    elif "Allow notifications?" in xml:
+        phone(text="Allow notifications").click(timeout=5)
     elif "Less secure:" in xml:
         phone(textStartsWith="Less secure:").click(timeout=5)
         phone(text="Next").click(timeout=5)
+        return True
     else:
         for label in (
             "Connect to my",
@@ -128,8 +131,14 @@ def advance_onboarding(phone, xml, password):
             "Continue",
             "Finish",
         ):
-            if phone(textStartsWith=label).click_exists(timeout=0.2):
+            button = (
+                phone(textStartsWith=label)
+                if label == "Connect to my"
+                else phone(text=label)
+            )
+            if button.click_exists(timeout=0.2):
                 break
+    return False
 
 
 def onboard_phone(phone, password):
@@ -138,6 +147,7 @@ def onboard_phone(phone, password):
     end = time.monotonic() + 180
     previous = ""
     screens = 0
+    security_complete = False
     while time.monotonic() < end:
         xml = phone.dump_hierarchy()
         if xml != previous:
@@ -150,10 +160,11 @@ def onboard_phone(phone, password):
             previous = xml
         if dismiss_launcher_dialog(phone, xml):
             continue
-        advance_onboarding(phone, xml, password)
+        if advance_onboarding(phone, xml, password):
+            security_complete = True
         # Registration is only half of onboarding: finish the security choice
         # before moving the app into the background.
-        if "io.homeassistant.companion.android.webview" in xml or "Overview" in xml:
+        if security_complete and "android.webkit.WebView" in xml:
             return
         time.sleep(1)
     raise AssertionError("Companion onboarding did not complete; see onboarding.xml")
