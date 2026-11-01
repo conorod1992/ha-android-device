@@ -96,11 +96,25 @@ def onboard_phone(phone, password):
     phone.app_start(PACKAGE)
     end = time.monotonic() + 180
     previous = ""
+    screens = 0
     while time.monotonic() < end:
         xml = phone.dump_hierarchy()
         if xml != previous:
-            (ARTIFACTS / "onboarding.xml").write_text(xml)
+            (ARTIFACTS / "onboarding.xml").write_text(
+                xml.replace(password, "[redacted]")
+            )
+            if screens < 30:
+                phone.screenshot(str(ARTIFACTS / f"onboarding-{screens:02}.png"))
+                screens += 1
             previous = xml
+        if "Pixel Launcher isn" in xml and "responding" in xml:
+            # The emulator launcher can ANR during first boot. It is not the
+            # application under test; dismiss only this specific system dialog.
+            phone(text="Close app").click(timeout=5)
+            phone.app_start(PACKAGE)
+            continue
+        if "Home Assistant isn" in xml and "responding" in xml:
+            raise AssertionError("Companion stopped responding during onboarding")
         edits = phone(className="android.widget.EditText")
         if edits.count >= 2:
             edits[0].set_text("emulator")
@@ -174,6 +188,7 @@ def environment(tmp_path_factory):
 
         eventually(ready, timeout=240)
         password = secrets.token_urlsafe(24)
+        print(f"::add-mask::{password}", flush=True)
         response = requests.post(
             URL + "/api/onboarding/users",
             json={
@@ -196,7 +211,9 @@ def environment(tmp_path_factory):
             timeout=30,
         )
         response.raise_for_status()
-        server = Server(response.json()["access_token"])
+        token = response.json()["access_token"]
+        print(f"::add-mask::{token}", flush=True)
+        server = Server(token)
         for step in ("core_config", "analytics"):
             server.api("/api/onboarding/" + step, {})
         server.api(
