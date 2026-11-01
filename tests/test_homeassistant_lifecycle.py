@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.android_device_control import (
     async_setup_entry,
@@ -39,6 +40,54 @@ async def test_stop_event_retires_listeners_without_double_unsubscribe(server, c
     assert "Unable to remove unknown job listener" not in caplog.text
     assert EVENT_HOMEASSISTANT_STOP not in hass.bus.async_listeners()
     assert not calls
+
+
+async def test_unload_closes_notifications_while_find_phone_dispatch_drains(server):
+    hass, calls = server
+    config_entry = entry()
+    await async_setup_entry(hass, config_entry)
+    notifications = hass.data[DOMAIN][DATA_NOTIFICATION_MANAGER]
+    await notifications._async_ensure_loaded()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_find(call):
+        calls.append(call)
+        if call.data["message"] == "Finding phone":
+            entered.set()
+            await release.wait()
+
+    hass.services.async_register("notify", PHONE.notify_service, slow_find)
+    start = asyncio.create_task(
+        hass.services.async_call(
+            DOMAIN,
+            "find_phone",
+            {"device_id": "phone", "wake_screen": False, "stop_when_unlocked": False},
+            blocking=True,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 1)
+    unload = asyncio.create_task(async_unload_entry(hass, config_entry))
+    try:
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not hass.services.has_service(DOMAIN, "find_phone")
+        assert not unload.done()
+        # An already queued action holds this manager reference. It must not
+        # dispatch while unload is waiting for the other manager's transport.
+        with pytest.raises(HomeAssistantError) as raised:
+            await notifications.async_prompt(
+                PHONE,
+                title="Late prompt",
+                message="Must not dispatch",
+                tag=None,
+                actions=[{"id": "yes", "title": "Yes"}],
+            )
+        assert raised.value.translation_key == "integration_unloading"
+        assert [call.data["message"] for call in calls] == ["Finding phone"]
+    finally:
+        release.set()
+        await asyncio.gather(start, unload, return_exceptions=True)
+    assert DOMAIN not in hass.data
 
 
 def entry():

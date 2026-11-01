@@ -1466,6 +1466,9 @@ async def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister integration actions."""
     for service in list(hass.services.async_services().get(DOMAIN, {})):
         hass.services.async_remove(DOMAIN, service)
-    await async_remove_find_phone_manager(hass)
-    await async_remove_notification_manager(hass)
+    # Both managers must reject queued work while either drains in-flight sends.
+    await asyncio.gather(
+        async_remove_find_phone_manager(hass),
+        async_remove_notification_manager(hass),
+    )
     hass.data.pop(DOMAIN, None)
