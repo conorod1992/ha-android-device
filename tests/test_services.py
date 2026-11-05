@@ -35,7 +35,9 @@ class FakeServices:
         self.schemas[name] = schema
         self.responses[name] = supports_response
 
-    async def async_call(self, domain, service, data, *, blocking) -> None:
+    async def async_call(
+        self, domain, service, data, *, blocking, context=None
+    ) -> None:
         self.calls.append((domain, service, data, blocking))
         if self.failure:
             raise self.failure
@@ -66,7 +68,9 @@ class FakeBus:
 @pytest.fixture
 async def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     instance = SimpleNamespace(services=FakeServices(), bus=FakeBus(), data={})
-    instance.async_create_task = lambda coro, name: asyncio.create_task(coro, name=name)
+    instance.async_create_background_task = lambda coro, name: asyncio.create_task(
+        coro, name=name
+    )
     target = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
     monkeypatch.setattr(
         services_module, "resolve_android_targets", lambda hass, ids: [target]
@@ -575,6 +579,12 @@ async def test_dedicated_ble_actions_match_generic_command(
 async def test_every_action_payload(
     hass: SimpleNamespace, service: str, data: dict, expected: dict
 ) -> None:
+    if service.startswith("kiosk_"):
+        with pytest.raises(HomeAssistantError) as error:
+            await call_action(hass, service, data)
+        assert error.value.translation_key == "unsupported_kiosk"
+        assert not hass.services.calls
+        return
     outgoing = await call_action(hass, service, data)
     assert {key: outgoing[key] for key in expected} == expected
     assert outgoing["target"] == ["webhook-phone"]

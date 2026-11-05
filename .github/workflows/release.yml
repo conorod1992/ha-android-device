@@ -16,14 +16,33 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  validate:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
+  android-e2e:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/android-e2e.yml
+    permissions:
+      contents: read
+
   release:
+    needs: [test, validate, android-e2e]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Python

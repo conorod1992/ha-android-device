@@ -45,7 +45,7 @@ class FakeHass:
         self.data = {}
         self.bus = FakeBus()
 
-    def async_create_task(self, coro, name):
+    def async_create_background_task(self, coro, name):
         return asyncio.create_task(coro, name=name)
 
 
@@ -331,6 +331,34 @@ async def test_initial_optional_failure_still_starts_when_sound_dispatches(
     await manager.async_shutdown()
 
 
+@pytest.mark.parametrize("show_stop_action", [False, True])
+async def test_failed_one_shot_tts_clears_its_control_notification(
+    phone, show_stop_action
+):
+    calls = []
+
+    async def fail_sound(_target, command):
+        calls.append(command)
+        if command["message"] == "TTS":
+            raise RuntimeError("TTS unavailable")
+
+    manager = FindPhoneManager(FakeHass(), fail_sound)
+    with pytest.raises(HomeAssistantError):
+        await manager.async_start(
+            phone,
+            options(sound_mode="tts", repeat=False, show_stop_action=show_stop_action),
+        )
+    assert not manager.sessions
+    assert [item["message"] for item in calls] == [
+        "command_screen_on",
+        *(["Finding phone"] if show_stop_action else []),
+        "TTS",
+        *(["clear_notification"] if show_stop_action else []),
+    ]
+    if show_stop_action:
+        assert calls[-1]["data"]["tag"] == FIND_PHONE_NOTIFICATION_TAG
+
+
 async def test_exact_action_stops_only_matching_session(
     phone: AndroidTarget,
 ) -> None:
@@ -359,7 +387,7 @@ async def test_exact_action_stops_only_matching_session(
     await manager.async_shutdown()
 
 
-async def test_unmatched_action_stops_sole_session_as_fallback(
+async def test_unmatched_action_cannot_stop_sole_session(
     caplog: pytest.LogCaptureFixture, phone: AndroidTarget
 ) -> None:
     recorder = Recorder()
@@ -372,9 +400,10 @@ async def test_unmatched_action_stops_sole_session_as_fallback(
         )
     )
 
-    assert session.stop_event.is_set()
-    assert manager.sessions == {}
-    assert "stopping the sole active session as a fallback" in caplog.text
+    assert not session.stop_event.is_set()
+    assert manager.sessions == {phone.device_id: session}
+    assert "metadata is insufficient" in caplog.text
+    await manager.async_shutdown()
 
 
 async def test_unmatched_action_is_ignored_with_multiple_sessions(

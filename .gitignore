@@ -12,3 +12,6 @@ venv/
 dist/
 build/
 
+
+companion.apk
+e2e-artifacts/

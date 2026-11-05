@@ -38,7 +38,7 @@ class FakeBus:
     def async_listen_once(self, event_type, listener):
         return self.async_listen(event_type, listener)
 
-    def async_fire(self, event_type, data) -> None:
+    def async_fire(self, event_type, data, *, context=None) -> None:
         self.fired.append((event_type, data))
 
 
@@ -47,7 +47,7 @@ class FakeHass:
         self.data = {}
         self.bus = FakeBus()
 
-    def async_create_task(self, coro, name):
+    def async_create_background_task(self, coro, name):
         return asyncio.create_task(coro, name=name)
 
 

@@ -3,6 +3,10 @@ name: Test
 on:
   pull_request:
   push:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -13,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -28,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

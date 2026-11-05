@@ -35,7 +35,9 @@ class FakeServices:
         self.schemas[name] = schema
         self.responses[name] = supports_response
 
-    async def async_call(self, domain, service, data, *, blocking) -> None:
+    async def async_call(
+        self, domain, service, data, *, blocking, context=None
+    ) -> None:
         self.calls.append((domain, service, data, blocking))
         target = data["target"][0]
         if target in self.fail_targets:
@@ -68,7 +70,9 @@ class FakeBus:
 async def hass(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Return a registered fake Home Assistant instance with one Android target."""
     instance = SimpleNamespace(services=FakeServices(), bus=FakeBus(), data={})
-    instance.async_create_task = lambda coro, name: asyncio.create_task(coro, name=name)
+    instance.async_create_background_task = lambda coro, name: asyncio.create_task(
+        coro, name=name
+    )
     phone = AndroidTarget("phone", "Pixel 9", "webhook-phone", "mobile_app_pixel_9")
     monkeypatch.setattr(
         services_module,
@@ -111,6 +115,47 @@ async def test_generic_ble_bad_measured_power_is_service_validation_error(
         )
 
     assert hass.services.calls == []
+
+
+async def test_single_invalid_target_preserves_actionable_error(hass, monkeypatch):
+    error = ServiceValidationError(
+        translation_domain=DOMAIN,
+        translation_key="push_not_supported",
+        translation_placeholders={"device_name": "Kitchen tablet"},
+    )
+
+    def resolve(*_args):
+        raise error
+
+    monkeypatch.setattr(services_module, "resolve_android_targets", resolve)
+    with pytest.raises(ServiceValidationError) as raised:
+        await _call(hass, "stop_tts", {"device_id": "tablet"})
+    assert raised.value is error
+    assert not hass.services.calls
+
+
+async def test_all_invalid_targets_include_friendly_names_and_reasons(
+    hass, monkeypatch
+):
+    def resolve(_hass, ids):
+        raise ServiceValidationError(
+            f"Push missing for {ids[0]}",
+            translation_placeholders={"device_name": f"Friendly {ids[0]}"},
+        )
+
+    monkeypatch.setattr(services_module, "resolve_android_targets", resolve)
+    with pytest.raises(ServiceValidationError) as raised:
+        await _call(hass, "stop_tts", {"device_id": ["phone", "tablet"]})
+    details = raised.value.translation_placeholders["details"]
+    assert "Friendly phone" in details
+    assert "Push missing for tablet" in details
+
+
+async def test_all_transport_failures_retain_cause(hass):
+    hass.services.fail_targets.add("webhook-phone")
+    with pytest.raises(HomeAssistantError) as raised:
+        await _call(hass, "stop_tts", {"device_id": "phone"})
+    assert "transport failed" in raised.value.translation_placeholders["devices"]
 
 
 async def test_partial_resolution_failure_is_logged_without_blocking_valid_target(

@@ -1,0 +1,461 @@
+"""Real release APK -> local push -> Android UI -> Home Assistant event tests.
+
+Run only through the emulator workflow (or with a disposable local emulator).
+No transport, device resolver, event, or Companion receiver is mocked.
+"""
+
+import json
+import re
+import secrets
+import shutil
+import subprocess
+import time
+from contextlib import ExitStack
+from pathlib import Path
+
+import pytest
+import requests
+import uiautomator2 as u2
+import websocket
+
+from .runtime import home_assistant_runtime, session_event, websocket_command
+
+PACKAGE = "io.homeassistant.companion.android.minimal"
+URL = "http://127.0.0.1:8123"
+ARTIFACTS = Path("e2e-artifacts")
+DOMAIN = "android_device_control"
+
+
+def adb(*args):
+    return subprocess.check_output([shutil.which("adb"), *args], text=True, timeout=30)  # noqa: S603 - fixed adb arguments
+
+
+def eventually(check, timeout=60):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        result = check()
+        if result:
+            return result
+        time.sleep(1)
+    raise AssertionError(f"Timed out waiting for {check}")
+
+
+class Server:
+    def __init__(self, token):
+        self.http = requests.Session()
+        self.http.headers["Authorization"] = f"Bearer {token}"
+        self.ws = websocket.create_connection(
+            "ws://127.0.0.1:8123/api/websocket", timeout=15
+        )
+        assert json.loads(self.ws.recv())["type"] == "auth_required"
+        self.ws.send(json.dumps({"type": "auth", "access_token": token}))
+        assert json.loads(self.ws.recv())["type"] == "auth_ok"
+        self.counter = 0
+        self.events = []
+
+    def api(self, path, data=None):
+        response = self.http.request(
+            "GET" if data is None else "POST", URL + path, json=data, timeout=60
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def command(self, kind, **data):
+        self.counter += 1
+        return websocket_command(
+            self.ws, {"id": self.counter, "type": kind, **data}, self.events
+        )
+
+    def call(self, service, **data):
+        return self.command(
+            "call_service",
+            domain=DOMAIN,
+            service=service,
+            service_data={"device_id": self.device, **data},
+            return_response=service.startswith("ask_")
+            or service in {"notify", "notify_until_acknowledged"},
+        )
+
+    def event(self, event_type, session_id):
+        return session_event(self.ws, self.events, event_type, session_id)
+
+
+def dismiss_launcher_dialog(phone, xml):
+    if "Home Assistant isn" in xml and "responding" in xml:
+        raise AssertionError("Companion stopped responding during onboarding")
+    if "Pixel Launcher isn" not in xml or "responding" not in xml:
+        return False
+    # Dismiss only the emulator's first-boot launcher ANR, never Companion's.
+    phone(text="Close app").click(timeout=5)
+    phone.app_start(PACKAGE)
+    return True
+
+
+def advance_onboarding(phone, xml, password):
+    edits = phone(className="android.widget.EditText")
+    if edits.count >= 2:
+        edits[0].set_text("emulator")
+        edits[1].set_text(password)
+        phone(textMatches="(?i)log in|sign in").click_exists(timeout=2)
+    elif "name this device" in xml:
+        edits[0].set_text("CI Android")
+        phone(text="Save").click_exists(timeout=2)
+    elif "address?" in xml and edits.count:
+        edits[0].set_text("http://10.0.2.2:8123")
+        phone(text="Connect").click_exists(timeout=2)
+    elif "Allow notifications?" in xml:
+        phone(text="Allow notifications").click(timeout=5)
+    elif "Less secure:" in xml:
+        phone(textStartsWith="Less secure:").click(timeout=5)
+        phone(text="Next").click(timeout=5)
+        return True
+    else:
+        for label in (
+            "Connect to my",
+            "Enter address manually",
+            "Got it",
+            "Allow notifications",
+            "Allow",
+            "Next",
+            "Continue",
+            "Finish",
+        ):
+            button = (
+                phone(textStartsWith=label)
+                if label == "Connect to my"
+                else phone(text=label)
+            )
+            if button.click_exists(timeout=0.2):
+                break
+    return False
+
+
+def onboard_phone(phone, password):
+    """Drive the pinned APK's ordinary onboarding, including its real login UI."""
+    phone.app_start(PACKAGE)
+    end = time.monotonic() + 180
+    previous = ""
+    screens = 0
+    security_complete = False
+    while time.monotonic() < end:
+        xml = phone.dump_hierarchy()
+        if xml != previous:
+            (ARTIFACTS / "onboarding.xml").write_text(
+                xml.replace(password, "[redacted]")
+            )
+            if screens < 30:
+                phone.screenshot(str(ARTIFACTS / f"onboarding-{screens:02}.png"))
+                screens += 1
+            previous = xml
+        if dismiss_launcher_dialog(phone, xml):
+            continue
+        if advance_onboarding(phone, xml, password):
+            security_complete = True
+        # Registration is only half of onboarding: finish the security choice
+        # before moving the app into the background.
+        if security_complete and "android.webkit.WebView" in xml:
+            return
+        time.sleep(1)
+    raise AssertionError("Companion onboarding did not complete; see onboarding.xml")
+
+
+def connect_phone(server, phone, password):
+    onboard_phone(phone, password)
+    entries = eventually(
+        lambda: [
+            e
+            for e in server.api("/api/config/config_entries/entry")
+            if e["domain"] == "mobile_app"
+        ]
+    )
+    devices = server.command("config/device_registry/list")
+    server.device = next(
+        d["id"] for d in devices if entries[0]["entry_id"] in d["config_entries"]
+    )
+    flow = server.api(
+        "/api/config/config_entries/flow",
+        {"handler": DOMAIN, "show_advanced_options": False},
+    )
+    result = server.api("/api/config/config_entries/flow/" + flow["flow_id"], {})
+    assert result["type"] == "create_entry", result
+    eventually(lambda: any(s["domain"] == DOMAIN for s in server.api("/api/services")))
+    server.command("subscribe_events")
+    # Resume after registration so Companion schedules its local-push worker
+    # with the newly added server (the initial resume had no server yet).
+    phone.press("home")
+    phone.app_start(PACKAGE)
+    eventually(lambda: local_push_ready(server), timeout=60)
+    eventually(lambda: visible("E2E connection check"))
+    server.call("clear_notification", tag="e2e-ready")
+    phone.press("home")
+
+
+@pytest.fixture(scope="module")
+def environment(tmp_path_factory):
+    ARTIFACTS.mkdir(exist_ok=True)
+    config = tmp_path_factory.mktemp("homeassistant")
+    shutil.copytree("custom_components", config / "custom_components")
+    (config / "configuration.yaml").write_text(
+        "homeassistant:\n  name: Emulator CI\n  time_zone: UTC\n"
+        "http:\napi:\nfrontend:\nconfig:\nmobile_app:\nlovelace:\nperson:\nonboarding:\n"
+    )
+    with (
+        home_assistant_runtime(config, ARTIFACTS / "home-assistant.log"),
+        ExitStack() as resources,
+    ):
+        phone = None
+        try:
+
+            def ready():
+                try:
+                    return (
+                        requests.get(URL + "/api/onboarding", timeout=3).status_code
+                        == 200
+                    )
+                except requests.ConnectionError:
+                    return False
+
+            eventually(ready, timeout=240)
+            password = secrets.token_urlsafe(24)
+            print(f"::add-mask::{password}", flush=True)  # noqa: T201 - Actions masking command
+            response = requests.post(
+                URL + "/api/onboarding/users",
+                json={
+                    "name": "Emulator",
+                    "username": "emulator",
+                    "password": password,
+                    "client_id": URL + "/",
+                    "language": "en",
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            response = requests.post(
+                URL + "/auth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": response.json()["auth_code"],
+                    "client_id": URL + "/",
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            token = response.json()["access_token"]
+            print(f"::add-mask::{token}", flush=True)  # noqa: T201 - Actions masking command
+            server = Server(token)
+            resources.callback(server.http.close)
+            resources.callback(server.ws.close)
+            for step in ("core_config", "analytics"):
+                server.api("/api/onboarding/" + step, {})
+            server.api(
+                "/api/onboarding/integration",
+                {"client_id": URL + "/", "redirect_uri": URL + "/"},
+            )
+            adb("logcat", "-G", "16M")
+            adb("install", "-r", "companion.apk")
+            adb("shell", "dumpsys", "deviceidle", "whitelist", "+" + PACKAGE)
+            adb(
+                "shell", "pm", "grant", PACKAGE, "android.permission.POST_NOTIFICATIONS"
+            )
+            phone = u2.connect()
+            connect_phone(server, phone, password)
+            yield server, phone
+        finally:
+            if phone:
+                phone.screenshot(str(ARTIFACTS / "final.png"))
+                (ARTIFACTS / "final.xml").write_text(phone.dump_hierarchy())
+            (ARTIFACTS / "logcat.txt").write_text(adb("logcat", "-d", "-t", "30000"))
+            (ARTIFACTS / "notifications.txt").write_text(
+                adb("shell", "dumpsys", "notification", "--noredact")
+            )
+
+
+def local_push_ready(server):
+    try:
+        server.call(
+            "notify", title="E2E connection check", message="Ready", tag="e2e-ready"
+        )
+    except AssertionError as error:
+        if "not connected to local push notifications" in str(error):
+            return False
+        raise
+    return True
+
+
+@pytest.fixture(autouse=True)
+def capture_case(environment, request):
+    yield
+    _server, phone = environment
+    phone.screenshot(str(ARTIFACTS / f"{request.node.name}.png"))
+    (ARTIFACTS / f"{request.node.name}.xml").write_text(phone.dump_hierarchy())
+    (ARTIFACTS / f"{request.node.name}-notifications.txt").write_text(notifications())
+
+
+def notifications():
+    dump = adb("shell", "dumpsys", "notification", "--noredact")
+    active = dump.split("Notification List:", 1)[1]
+    for boundary in (
+        "mArchive=",
+        "Ranking Config:",
+        "Snoozed Notification List:",
+        "Enqueued Notification List:",
+    ):
+        active = active.split(boundary, 1)[0]
+    return active
+
+
+def notification_record(title):
+    return next(
+        (
+            record
+            for record in notifications().split("NotificationRecord(")
+            if re.search(rf"android\.title=\w+ \({re.escape(title)}\)", record)
+        ),
+        "",
+    )
+
+
+def visible(title):
+    return bool(notification_record(title))
+
+
+def click_action(phone, label):
+    phone.open_notification()
+    button = phone(text=label)
+    assert button.wait(timeout=15)
+    phone.screenshot(str(ARTIFACTS / (re.sub(r"\W+", "-", label) + "-action.png")))
+    button.click()
+
+
+def test_progress_and_clear(environment):
+    server, phone = environment
+    server.call(
+        "notify_progress",
+        title="E2E progress",
+        message="Copying",
+        tag="e2e-progress",
+        current=3,
+        maximum=10,
+    )
+    eventually(lambda: visible("E2E progress"))
+    dump = notification_record("E2E progress")
+    assert re.search(r"android.progress=(?:Integer \()?3(?:\)|\s)", dump)
+    assert re.search(r"android.progressMax=(?:Integer \()?10(?:\)|\s)", dump)
+    server.call(
+        "notify_progress",
+        title="E2E progress",
+        message="Waiting",
+        tag="e2e-progress",
+        indeterminate=True,
+    )
+    eventually(
+        lambda: re.search(
+            r"android.progressIndeterminate=(?:Boolean \()?true",
+            notification_record("E2E progress"),
+        )
+    )
+    phone.open_notification()
+    assert phone(text="E2E progress").wait(timeout=10)
+    phone.screenshot(str(ARTIFACTS / "progress.png"))
+    server.call("clear_notification", tag="e2e-progress")
+    eventually(lambda: not visible("E2E progress"))
+    phone.press("home")
+
+
+def test_action_returns_real_session_event(environment):
+    server, phone = environment
+    result = server.call(
+        "ask_yes_no",
+        title="E2E question",
+        message="Choose an answer",
+        tag="e2e-question",
+        yes_label="E2E Yes",
+        no_label="E2E No",
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    eventually(lambda: visible("E2E question"))
+    click_action(phone, "E2E Yes")
+    event = server.event("android_device_control_notification_action", session)
+    assert event["action_id"] == "yes"
+    assert event["device_id"] == server.device
+
+
+def test_acknowledgement_replacement_and_stop(environment):
+    server, phone = environment
+    server.call(
+        "notify_until_acknowledged",
+        title="E2E old",
+        message="Old request",
+        tag="e2e-ack",
+        repeat_interval={"seconds": 60},
+        max_attempts=2,
+    )
+    eventually(lambda: visible("E2E old"))
+    result = server.call(
+        "notify_until_acknowledged",
+        title="E2E replacement",
+        message="New request",
+        tag="e2e-ack",
+        acknowledgement_label="E2E Done",
+        repeat_interval={"seconds": 60},
+        max_attempts=5,
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    eventually(lambda: visible("E2E replacement") and not visible("E2E old"))
+    click_action(phone, "E2E Done")
+    event = server.event("android_device_control_notification_acknowledged", session)
+    assert event["device_id"] == server.device
+    eventually(lambda: not visible("E2E replacement"))
+    time.sleep(65)
+    assert not visible("E2E replacement")
+
+
+def test_find_phone_stop_button(environment):
+    server, phone = environment
+    server.call(
+        "find_phone",
+        wake_screen=False,
+        stop_when_unlocked=False,
+        max_attempts=100,
+        repeat_interval={"seconds": 3},
+    )
+    eventually(lambda: visible("Find Phone"))
+    click_action(phone, "Stop ringing")
+    eventually(lambda: not visible("Find Phone"))
+    time.sleep(7)
+    assert not visible("Find Phone")
+
+
+def test_text_reply_returns_actual_input(environment):
+    server, phone = environment
+    result = server.call(
+        "ask_text",
+        title="E2E text",
+        message="Reply here",
+        tag="e2e-text",
+        reply_label="E2E Reply",
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    eventually(lambda: visible("E2E text"))
+    click_action(phone, "E2E Reply")
+    phone(className="android.widget.EditText").set_text("Reply from Android")
+    phone(resourceId="com.android.systemui:id/remote_input_send").click(timeout=10)
+    event = server.event("android_device_control_notification_action", session)
+    assert event["action_id"] == "reply"
+    assert event["response_text"] == "Reply from Android"
+
+
+def test_delivery_receipt_comes_from_companion(environment):
+    server, _phone = environment
+    result = server.call(
+        "notify",
+        title="E2E receipt",
+        message="Confirm local receipt",
+        tag="e2e-receipt",
+        confirm_delivery=True,
+    )
+    session = result["response"]["devices"][0]["session_id"]
+    event = server.event("android_device_control_notification_received", session)
+    assert event["device_id"] == server.device
+    eventually(lambda: visible("E2E receipt"))
+    server.call("clear_notification", tag="e2e-receipt")

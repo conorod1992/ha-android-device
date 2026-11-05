@@ -100,10 +100,7 @@ def _activity(
 def _serialize_list(name: str, value: Any) -> str:
     if not isinstance(value, list) or not value:
         raise vol.Invalid(f"Extra {name} must be a non-empty list")
-    try:
-        return ";".join(str(int(entry)) for entry in value)
-    except (TypeError, ValueError) as err:
-        raise vol.Invalid(f"Extra {name} must contain integers") from err
+    return ";".join(_serialize_number(name, "integer", entry) for entry in value)
 
 
 def _serialize_number(name: str, kind: str, value: Any) -> str:
@@ -111,9 +108,15 @@ def _serialize_number(name: str, kind: str, value: Any) -> str:
         if isinstance(value, bool):
             raise vol.Invalid(f"Extra {name} must be an integer")
         try:
-            return str(int(value))
-        except (TypeError, ValueError) as err:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError) as err:
             raise vol.Invalid(f"Extra {name} must be an integer") from err
+        if not isinstance(value, (str, int)) and value != number:
+            raise vol.Invalid(f"Extra {name} must be an integer")
+        bits = 32 if kind == "integer" else 64
+        if not -(2 ** (bits - 1)) <= number < 2 ** (bits - 1):
+            raise vol.Invalid(f"Extra {name} must fit a signed {bits}-bit {kind}")
+        return str(number)
     try:
         number = float(value)
     except (TypeError, ValueError) as err:
@@ -301,9 +304,12 @@ def email_payload(data: dict[str, Any]) -> dict[str, Any]:
     for key in ("subject", "body"):
         if data.get(key):
             params[key] = data[key]
+    if "body" in params:
+        params["body"] = params["body"].replace("\r\n", "\n").replace("\r", "\n")
+        params["body"] = params["body"].replace("\n", "\r\n")
     uri = f"mailto:{quote(','.join(recipients), safe='@,+')}"
     if params:
-        uri += f"?{urlencode(params)}"
+        uri += f"?{urlencode(params, quote_via=quote)}"
     return _activity(ACTION_SENDTO, uri=uri)
 
 
@@ -323,8 +329,10 @@ def calendar_payload(data: dict[str, Any]) -> dict[str, Any]:
             raise vol.Invalid("All-day event end date must be after start date")
         start = datetime.combine(start.date(), time.min, UTC)
         end = datetime.combine(end.date(), time.min, UTC)
-    elif end <= start:
-        raise vol.Invalid("Event end must be after start")
+    else:
+        start, end = dt_util.as_utc(start), dt_util.as_utc(end)
+        if end <= start:
+            raise vol.Invalid("Event end must be after start")
     items: list[dict[str, Any]] = [
         {"name": "title", "type": "string", "value": data["title"]},
         {"name": "beginTime", "type": "long", "value": _milliseconds(start)},

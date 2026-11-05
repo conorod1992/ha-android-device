@@ -394,25 +394,28 @@ launch_activity:
       example: com.google.android.apps.maps
       selector:
         text:
-    class_name:
-      selector:
-        text:
     uri:
       example: google.navigation:q=Dublin
       selector:
         text:
-    mime_type:
-      selector:
-        text:
-    extras:
-      example: alarm_label:work,alarm_enabled:false
-      selector:
-        text:
-    structured_extras:
-      example:
-        - {name: android.intent.extra.TEXT, type: string, value: Hello world}
-      selector:
-        object:
+    advanced_intent:
+      collapsed: true
+      fields:
+        class_name:
+          selector:
+            text:
+        mime_type:
+          selector:
+            text:
+        extras:
+          example: alarm_label:work,alarm_enabled:false
+          selector:
+            text:
+        structured_extras:
+          example:
+            - {name: android.intent.extra.TEXT, type: string, value: Hello world}
+          selector:
+            object:
 
 set_app_lock:
   fields:
@@ -540,32 +543,35 @@ notify:
     tag:
       selector:
         text:
-    channel:
-      selector:
-        text:
-    importance:
-      selector:
-        select:
-          options: [min, low, default, high, max]
-    sticky:
-      default: false
-      selector:
-        boolean:
-    timeout:
-      selector:
-        number:
-          min: 1
-          max: 86400
-          unit_of_measurement: s
-          mode: box
-    show_in_android_auto: &android_auto_field
-      default: false
-      selector:
-        boolean:
-    confirm_delivery: &confirm_delivery_field
-      default: false
-      selector:
-        boolean:
+    delivery_options:
+      collapsed: true
+      fields:
+        channel:
+          selector:
+            text:
+        importance:
+          selector:
+            select:
+              options: [min, low, default, high, max]
+        sticky:
+          default: false
+          selector:
+            boolean:
+        timeout:
+          selector:
+            number:
+              min: 1
+              max: 86400
+              unit_of_measurement: s
+              mode: box
+        show_in_android_auto: &android_auto_field
+          default: false
+          selector:
+            boolean:
+        confirm_delivery: &confirm_delivery_field
+          default: false
+          selector:
+            boolean:
 
 notify_urgent:
   fields:
@@ -581,28 +587,31 @@ notify_urgent:
     tag:
       selector:
         text:
-    channel:
-      default: Urgent
-      selector:
-        text:
-    importance:
-      default: high
-      selector:
-        select:
-          options: [default, high, max]
-    sticky:
-      default: false
-      selector:
-        boolean:
-    timeout:
-      selector:
-        number:
-          min: 1
-          max: 86400
-          unit_of_measurement: s
-          mode: box
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
+    delivery_options:
+      collapsed: true
+      fields:
+        channel:
+          default: Urgent
+          selector:
+            text:
+        importance:
+          default: high
+          selector:
+            select:
+              options: [default, high, max]
+        sticky:
+          default: false
+          selector:
+            boolean:
+        timeout:
+          selector:
+            number:
+              min: 1
+              max: 86400
+              unit_of_measurement: s
+              mode: box
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 prompt: &prompt_action
   fields:
@@ -623,8 +632,6 @@ prompt: &prompt_action
       default: false
       selector:
         boolean:
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
     actions:
       required: true
       example:
@@ -632,6 +639,11 @@ prompt: &prompt_action
         - {id: no, title: "No"}
       selector:
         object:
+    delivery_options:
+      collapsed: true
+      fields:
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 ask_yes_no:
   fields:
@@ -649,8 +661,6 @@ ask_yes_no:
       selector:
         text:
     require_unlock: *require_unlock_field
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
     yes_label:
       default: "Yes"
       selector:
@@ -659,6 +669,11 @@ ask_yes_no:
       default: "No"
       selector:
         text:
+    delivery_options:
+      collapsed: true
+      fields:
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 ask_choice:
   fields:
@@ -676,14 +691,6 @@ ask_choice:
       selector:
         text:
     require_unlock: *require_unlock_field
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
-    choices:
-      example:
-        - {id: home, title: Home}
-        - {id: work, title: Work}
-      selector:
-        object:
     choice_1_label: &choice_label
       selector: {text: {}}
     choice_1_id: &choice_id
@@ -692,6 +699,20 @@ ask_choice:
     choice_2_id: *choice_id
     choice_3_label: *choice_label
     choice_3_id: *choice_id
+    advanced_choices:
+      collapsed: true
+      fields:
+        choices:
+          example:
+            - {id: home, title: Home}
+            - {id: work, title: Work}
+          selector:
+            object:
+    delivery_options:
+      collapsed: true
+      fields:
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 ask_text:
   fields:
@@ -701,8 +722,11 @@ ask_text:
     reply_label: {default: Reply, selector: {text: {}}}
     tag: {selector: {text: {}}}
     require_unlock: *require_unlock_field
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
+    delivery_options:
+      collapsed: true
+      fields:
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 notify_progress:
   fields: &progress_fields
@@ -716,11 +740,14 @@ notify_progress:
         number: {min: -1, mode: box}
     maximum: {selector: {number: {min: 1, mode: box}}}
     indeterminate: {default: false, selector: {boolean: {}}}
-    channel: {selector: {text: {}}}
-    importance: {selector: {select: {options: [min, low, default, high, max]}}}
-    sticky: {default: false, selector: {boolean: {}}}
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
+    delivery_options:
+      collapsed: true
+      fields:
+        channel: {selector: {text: {}}}
+        importance: {selector: {select: {options: [min, low, default, high, max]}}}
+        sticky: {default: false, selector: {boolean: {}}}
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 notify_image:
   fields:
@@ -729,11 +756,14 @@ notify_image:
     message: {required: true, selector: {text: {multiline: true}}}
     image: {required: true, selector: {text: {}}}
     tag: {selector: {text: {}}}
-    channel: {selector: {text: {}}}
-    importance: {selector: {select: {options: [min, low, default, high, max]}}}
-    sticky: {default: false, selector: {boolean: {}}}
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
+    delivery_options:
+      collapsed: true
+      fields:
+        channel: {selector: {text: {}}}
+        importance: {selector: {select: {options: [min, low, default, high, max]}}}
+        sticky: {default: false, selector: {boolean: {}}}
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 notify_live_update:
   fields:
@@ -745,11 +775,14 @@ notify_live_update:
     maximum: {selector: {number: {min: 1, mode: box}}}
     critical_text: {selector: {text: {}}}
     icon: {example: mdi:washing-machine, selector: {icon: {}}}
-    channel: {selector: {text: {}}}
-    importance: {selector: {select: {options: [min, low, default, high, max]}}}
-    sticky: {default: false, selector: {boolean: {}}}
-    show_in_android_auto: *android_auto_field
-    confirm_delivery: *confirm_delivery_field
+    delivery_options:
+      collapsed: true
+      fields:
+        channel: {selector: {text: {}}}
+        importance: {selector: {select: {options: [min, low, default, high, max]}}}
+        sticky: {default: false, selector: {boolean: {}}}
+        show_in_android_auto: *android_auto_field
+        confirm_delivery: *confirm_delivery_field
 
 notify_until_acknowledged:
   fields:
@@ -767,26 +800,29 @@ notify_until_acknowledged:
       default: android_device_control_acknowledgement
       selector:
         text:
-    channel:
-      default: Important
-      selector:
-        text:
     acknowledgement_label:
       default: Acknowledge
       selector:
         text:
-    repeat_interval:
-      default: {minutes: 5}
-      selector:
-        duration:
-          enable_day: false
-    max_attempts:
-      default: 5
-      selector:
-        number:
-          min: 1
-          max: 20
-          mode: box
+    repeat_options:
+      collapsed: true
+      fields:
+        channel:
+          default: Important
+          selector:
+            text:
+        repeat_interval:
+          default: {minutes: 5}
+          selector:
+            duration:
+              enable_day: false
+        max_attempts:
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 20
+              mode: box
 
 stop_notify_until_acknowledged:
   fields:
@@ -1086,32 +1122,35 @@ find_phone:
       default: Finding phone
       selector:
         text:
-    repeat:
-      default: true
-      selector:
-        boolean:
-    max_attempts:
-      default: 10
-      selector:
-        number:
-          min: 1
-          max: 100
-          step: 1
-          mode: box
-    repeat_interval:
-      default:
-        seconds: 15
-      selector:
-        duration:
-          enable_day: false
-    show_stop_action:
-      default: true
-      selector:
-        boolean:
-    stop_when_unlocked:
-      default: true
-      selector:
-        boolean:
+    repeat_options:
+      collapsed: true
+      fields:
+        repeat:
+          default: true
+          selector:
+            boolean:
+        max_attempts:
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 100
+              step: 1
+              mode: box
+        repeat_interval:
+          default:
+            seconds: 15
+          selector:
+            duration:
+              enable_day: false
+        show_stop_action:
+          default: true
+          selector:
+            boolean:
+        stop_when_unlocked:
+          default: true
+          selector:
+            boolean:
 
 stop_find_phone:
   fields:

@@ -179,3 +179,42 @@ def test_discovers_registered_android_devices(hass: SimpleNamespace) -> None:
     assert [(item["device_id"], item["device_name"]) for item in devices] == [
         ("phone", "Pixel 9")
     ]
+
+
+@pytest.mark.parametrize("missing", ["devices", "config_entries", "notify", "app_data"])
+def test_diagnostics_tolerate_incomplete_real_mobile_app_state(
+    hass, monkeypatch, missing, mobile_app_helpers
+):
+    for name in ("webhook_id_from_device_id", "supports_push", "get_notify_service"):
+        monkeypatch.setattr(device_module, name, getattr(mobile_app_helpers, name))
+    mobile = hass.data[MOBILE_APP_DOMAIN]
+    entry = mobile[DATA_CONFIG_ENTRIES]["webhook-phone"]
+    entry.data["app_data"] = {"push_token": "test", "push_url": "https://example.test"}
+    mobile["notify"] = SimpleNamespace(
+        registered_targets={"mobile_app_pixel_9": "webhook-phone"}
+    )
+    if missing == "app_data":
+        entry.data.pop(missing)
+    else:
+        mobile.pop(missing)
+
+    result = device_module.inspect_mobile_app_device(hass, "phone")
+    assert not result["ready"]
+    assert result["status"] == "mobile_app_unavailable"
+    assert isinstance(device_module.discover_android_devices(hass), list)
+
+
+@pytest.mark.parametrize("mobile", [None, {"devices": None}, {"config_entries": None}])
+def test_discovery_tolerates_missing_runtime_containers(hass, mobile):
+    hass.data[MOBILE_APP_DOMAIN] = mobile
+    assert device_module.discover_android_devices(hass) == []
+
+
+def test_diagnostics_report_moved_private_helper(hass, monkeypatch):
+    def missing_helper(*_args):
+        raise ImportError("helper moved")
+
+    monkeypatch.setattr(device_module, "get_notify_service", missing_helper)
+    result = device_module.inspect_mobile_app_device(hass, "phone")
+    assert result["status"] == "mobile_app_unavailable"
+    assert not result["ready"]

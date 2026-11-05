@@ -32,6 +32,13 @@ from .const import (
     NOTIFICATION_CONFIRMATION_KEY,
 )
 from .device import AndroidTarget
+from .runtime import (
+    DISPATCH_CONTEXT,
+    SessionLocks,
+    async_create_background_task,
+    ensure_running,
+    with_event_context,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,7 +87,9 @@ def progress_notification_payload(data: dict[str, Any]) -> dict[str, Any]:
         notification_data["progress"] = -1
         return result
     if data["indeterminate"]:
-        notification_data["progress_indeterminate"] = True
+        notification_data.update(
+            {"progress": 0, "progress_max": 1, "progress_indeterminate": True}
+        )
     else:
         maximum = data.get("maximum")
         if current is None or maximum is None:
@@ -240,8 +249,10 @@ class NotificationManager:
         self.prompts: OrderedDict[str, PromptSession] = OrderedDict()
         self.confirmations: OrderedDict[str, ConfirmationSession] = OrderedDict()
         self.acknowledgements: dict[tuple[str, str], AcknowledgementSession] = {}
+        self._pending_acknowledgements: dict[str, AcknowledgementSession] = {}
         self.stale_acknowledgements: dict[str, StaleAcknowledgement] = {}
-        self._ack_start_lock = asyncio.Lock()
+        self._ack_locks = SessionLocks()
+        self._closing = False
         self._unsubscribers: list[Callable[[], None]] = []
         self._restore_task: asyncio.Task[None] | None = None
 
@@ -252,32 +263,35 @@ class NotificationManager:
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_ACTION,
-                self._async_handle_action,
+                with_event_context(self._async_handle_action),
             )
         )
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_MOBILE_APP_NOTIFICATION_RECEIVED,
-                self._async_handle_received,
+                with_event_context(self._async_handle_received),
             )
         )
         self._unsubscribers.append(
-            self.hass.bus.async_listen_once(
+            self.hass.bus.async_listen(
                 EVENT_HOMEASSISTANT_STOP,
                 self._async_handle_hass_stop,
             )
         )
         if self._store is not None:
-            self._restore_task = self.hass.async_create_task(
+            self._restore_task = async_create_background_task(
+                self.hass,
                 self._async_ensure_loaded(),
                 f"{DOMAIN} restore notification sessions",
             )
 
     async def _async_ensure_loaded(self) -> None:
         """Restore bounded metadata once and reconcile managed notifications."""
+        ensure_running(self._closing)
         if self._loaded:
             return
         async with self._load_lock:
+            ensure_running(self._closing)
             if self._loaded:
                 return
             raw: dict[str, Any] | None = None
@@ -289,10 +303,11 @@ class NotificationManager:
                 _LOGGER.warning(
                     "Could not load notification session metadata", exc_info=True
                 )
-            self._loaded = True
+            ensure_running(self._closing)
             if isinstance(raw, dict):
                 self._restore(raw)
             await self._async_reconcile_stale_acknowledgements()
+            self._loaded = True
             await self._async_save()
 
     def _restore(self, raw: dict[str, Any]) -> None:
@@ -384,7 +399,8 @@ class NotificationManager:
 
     async def _async_save(self) -> None:
         """Persist the bounded metadata needed to recognize existing actions."""
-        if self._store is None or not self._loaded:
+        self._prune_expired()
+        if self._closing or self._store is None or not self._loaded:
             return
         acknowledgements = (
             [_ack_to_dict(session) for session in self.acknowledgements.values()]
@@ -426,6 +442,7 @@ class NotificationManager:
     ) -> PromptSession:
         """Send one isolated actionable notification."""
         await self._async_ensure_loaded()
+        ensure_running(self._closing)
         session_id = uuid4().hex
         actions_by_token = {
             f"{NOTIFICATION_ACTION_PREFIX}{uuid4().hex}": item["id"] for item in actions
@@ -453,11 +470,13 @@ class NotificationManager:
             self._add_confirmation(session_id, target, tag)
             await self._async_save()
         try:
+            ensure_running(self._closing)
             await self._send(
                 target,
                 {"title": title, "message": message, "data": notification_data},
             )
-        except Exception:
+            ensure_running(self._closing)
+        except (Exception, asyncio.CancelledError):
             self.prompts.pop(session_id, None)
             self.confirmations.pop(session_id, None)
             await self._async_save()
@@ -473,6 +492,7 @@ class NotificationManager:
     ) -> ConfirmationSession:
         """Send with unique, persisted correlation for one canonical target."""
         await self._async_ensure_loaded()
+        ensure_running(self._closing)
         session_id = uuid4().hex
         session = self._add_confirmation(session_id, target, tag)
         correlated_payload = dict(notify_payload)
@@ -486,8 +506,10 @@ class NotificationManager:
         correlated_payload["data"] = notification_data
         await self._async_save()
         try:
+            ensure_running(self._closing)
             await self._send(target, correlated_payload)
-        except Exception:
+            ensure_running(self._closing)
+        except (Exception, asyncio.CancelledError):
             self.confirmations.pop(session_id, None)
             await self._async_save()
             raise
@@ -512,7 +534,8 @@ class NotificationManager:
         await self._async_ensure_loaded()
         key = (target.device_id, options.tag)
         old: AcknowledgementSession | None = None
-        async with self._ack_start_lock:
+        async with self._ack_locks.get(key):
+            ensure_running(self._closing)
             old = self.acknowledgements.get(key)
             session = AcknowledgementSession(
                 target=target,
@@ -522,54 +545,70 @@ class NotificationManager:
                 stop_event=asyncio.Event(),
                 created_at=time.time(),
             )
-            # Sending to the same Companion tag atomically replaces the phone-side
-            # notification. Do not clear the tag while retiring the old task.
-            await self._send_acknowledgement_attempt(session)
-            session.attempts_sent = 1
-            if old is not None:
-                # A repeat waiting for this lock will observe the stop/current checks
-                # below and cannot overwrite the replacement after ownership moves.
-                old.stop_event.set()
-            self.acknowledgements[key] = session
-            session.task = self.hass.async_create_task(
-                self._async_repeat_acknowledgement(session),
-                f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
-            )
-            await self._async_save()
-        if (
-            old is not None
-            and old.task is not None
-            and old.task is not asyncio.current_task()
-        ):
-            # Do not wait while holding _ack_start_lock: the old repeat may be
-            # queued on that lock so it can verify that it no longer owns the tag.
-            await asyncio.gather(old.task, return_exceptions=True)
+            # An action may arrive while notify is still returning. Let that
+            # handler find this token and wait for ownership under the key lock,
+            # without retiring the old working session until dispatch succeeds.
+            self._pending_acknowledgements[session.action_token] = session
+            try:
+                await self._send_acknowledgement_attempt(session)
+                ensure_running(self._closing)
+                session.attempts_sent = 1
+                if old is not None:
+                    old.stop_event.set()
+                    if old.task is not None:
+                        old.task.cancel()
+                # Commit the dispatched token before yielding to task retirement
+                # or storage. Caller cancellation must not leave the old,
+                # stopped session owning the replacement's notification.
+                self.acknowledgements[key] = session
+                session.task = async_create_background_task(
+                    self.hass,
+                    self._async_repeat_acknowledgement(session),
+                    f"{DOMAIN} acknowledgement {target.device_id} {options.tag}",
+                )
+                await self._async_save()
+                if old is not None and old.task is not None:
+                    await asyncio.gather(old.task, return_exceptions=True)
+            finally:
+                self._pending_acknowledgements.pop(session.action_token, None)
         return session
 
     async def async_stop_acknowledgement(self, target: AndroidTarget, tag: str) -> bool:
         """Stop a known session and always request best-effort tag clearing."""
         await self._async_ensure_loaded()
-        session = self.acknowledgements.get((target.device_id, tag))
-        if session is not None:
-            await self._async_stop_acknowledgement(session, clear=True)
-            return True
-        self.stale_acknowledgements = {
-            token: stale
-            for token, stale in self.stale_acknowledgements.items()
-            if (stale.target.device_id, stale.tag) != (target.device_id, tag)
-        }
-        await self._clear(target, tag)
-        await self._async_save()
-        return False
+        async with self._ack_locks.get((target.device_id, tag)):
+            ensure_running(self._closing)
+            session = self.acknowledgements.get((target.device_id, tag))
+            if session is not None:
+                return await self._async_stop_acknowledgement_locked(
+                    session, clear=True
+                )
+            self.stale_acknowledgements = {
+                token: stale
+                for token, stale in self.stale_acknowledgements.items()
+                if (stale.target.device_id, stale.tag) != (target.device_id, tag)
+            }
+            await self._clear(target, tag)
+            await self._async_save()
+            return False
 
     async def async_shutdown(self) -> None:
         """Cancel tasks and listeners without network cleanup."""
+        self._closing = True
+        while self._unsubscribers:
+            self._unsubscribers.pop()()
         if (
             self._restore_task is not None
             and self._restore_task is not asyncio.current_task()
             and not self._restore_task.done()
         ):
+            self._restore_task.cancel()
             await asyncio.gather(self._restore_task, return_exceptions=True)
+        async with self._load_lock:
+            pass
+        for lock in self._ack_locks.active():
+            async with lock:
+                pass
         sessions = list(self.acknowledgements.values())
         for session in sessions:
             session.stop_event.set()
@@ -579,11 +618,10 @@ class NotificationManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.acknowledgements.clear()
+        self._pending_acknowledgements.clear()
         self.prompts.clear()
         self.confirmations.clear()
         self.stale_acknowledgements.clear()
-        while self._unsubscribers:
-            self._unsubscribers.pop()()
 
     async def _async_repeat_acknowledgement(
         self, session: AcknowledgementSession
@@ -602,10 +640,10 @@ class NotificationManager:
                     break
                 if session.stop_event.is_set():
                     break
-                async with self._ack_start_lock:
+                async with self._ack_locks.get(session.key):
                     if self.acknowledgements.get(session.key) is not session:
                         return
-                    if session.stop_event.is_set():
+                    if self._closing or session.stop_event.is_set():
                         return
                     try:
                         await self._send_acknowledgement_attempt(session)
@@ -626,9 +664,7 @@ class NotificationManager:
             cleanup = not session.stop_event.is_set()
         finally:
             if cleanup and not session.stop_event.is_set():
-                await self._clear(session.target, session.options.tag)
-                self._remove_acknowledgement_if_current(session)
-                await self._async_save()
+                await self._async_stop_acknowledgement(session, clear=True)
 
     async def _send_acknowledgement_attempt(
         self, session: AcknowledgementSession
@@ -658,6 +694,10 @@ class NotificationManager:
 
     async def _async_handle_action(self, event: Event) -> None:
         await self._async_ensure_loaded()
+        if self._closing:
+            return
+        if self._prune_expired():
+            await self._async_save()
         action = event.data.get("action")
         if not isinstance(action, str):
             return
@@ -692,6 +732,7 @@ class NotificationManager:
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACTION,
             event_data,
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_handle_received(self, event: Event) -> None:
@@ -713,6 +754,7 @@ class NotificationManager:
                 "tag": session.tag,
                 "session_id": session.session_id,
             },
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_handle_acknowledgement(self, token: str) -> None:
@@ -722,7 +764,7 @@ class NotificationManager:
                 for item in self.acknowledgements.values()
                 if item.action_token == token
             ),
-            None,
+            self._pending_acknowledgements.get(token),
         )
         if session is None:
             stale = self.stale_acknowledgements.pop(token, None)
@@ -738,9 +780,11 @@ class NotificationManager:
                     "attempts": stale.attempts_sent,
                     "reconciled_after_restart": True,
                 },
+                context=DISPATCH_CONTEXT.get(),
             )
             return
-        await self._async_stop_acknowledgement(session, clear=True)
+        if not await self._async_stop_acknowledgement(session, clear=True):
+            return
         self.hass.bus.async_fire(
             EVENT_NOTIFICATION_ACKNOWLEDGED,
             {
@@ -749,6 +793,7 @@ class NotificationManager:
                 "tag": session.options.tag,
                 "attempts": session.attempts_sent,
             },
+            context=DISPATCH_CONTEXT.get(),
         )
 
     async def _async_stop_acknowledgement(
@@ -757,15 +802,51 @@ class NotificationManager:
         *,
         clear: bool,
         save: bool = True,
-    ) -> None:
+    ) -> bool:
+        async with self._ack_locks.get(session.key):
+            return await self._async_stop_acknowledgement_locked(
+                session, clear=clear and not self._closing, save=save
+            )
+
+    async def _async_stop_acknowledgement_locked(
+        self,
+        session: AcknowledgementSession,
+        *,
+        clear: bool,
+        save: bool = True,
+    ) -> bool:
+        """Clear only while this session still owns its target and tag."""
+        if self.acknowledgements.get(session.key) is not session:
+            return False
         session.stop_event.set()
-        if session.task is not None and session.task is not asyncio.current_task():
-            await asyncio.gather(session.task, return_exceptions=True)
         self._remove_acknowledgement_if_current(session)
-        if clear:
-            await self._clear(session.target, session.options.tag)
-        if save:
-            await self._async_save()
+        try:
+            if session.task is not None and session.task is not asyncio.current_task():
+                session.task.cancel()
+                await asyncio.gather(session.task, return_exceptions=True)
+        finally:
+            try:
+                if clear and not self._closing:
+                    await self._clear(session.target, session.options.tag)
+            finally:
+                if save:
+                    await self._async_save()
+        return True
+
+    def _prune_expired(self) -> bool:
+        """Apply the same token lifetime during uptime and after restart."""
+        cutoff = time.time() - SESSION_TTL
+        changed = False
+        for sessions in (
+            self.prompts,
+            self.confirmations,
+            self.stale_acknowledgements,
+        ):
+            for key, session in list(sessions.items()):
+                if session.created_at < cutoff:
+                    sessions.pop(key, None)
+                    changed = True
+        return changed
 
     async def _clear(self, target: AndroidTarget, tag: str) -> None:
         try:

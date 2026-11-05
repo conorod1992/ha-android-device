@@ -14,13 +14,14 @@ For example, you can:
 - send normal, urgent, actionable, or repeating notifications;
 - make a phone ring so you can find it;
 - speak text on the device;
-- control supported kiosk features; and
 - use advanced Android intents when you need them.
 
 You normally **do not need to know your `notify.mobile_app_*` action name, Android intent syntax, webhook ID, or device ID**. Select your Android device in the Home Assistant action editor and the integration handles the mapping for you.
 
 > [!NOTE]
 > This integration does not install anything extra on your Android device. It uses the official Home Assistant Companion App and its existing notification-command support.
+
+[Open repository in HACS](https://my.home-assistant.io/redirect/hacs_repository/?owner=conorod1992&repository=ha-android-device&category=integration) · [Add integration after installation](https://my.home-assistant.io/redirect/config_flow_start/?domain=android_device_control)
 
 ## Contents
 
@@ -99,6 +100,10 @@ After setup, the integration checks the Android Companion App devices already re
 
 No manual pairing or `notify.mobile_app_*` mapping is required.
 
+If setup names devices that need attention, you can finish setup and then open
+**Developer tools → Actions → Android Device Control: Check device compatibility**.
+Inspect each named device for its registration, push support, and notify-target status.
+
 ## Getting started
 
 Android Device Control is **action-only**. It does not create switches, buttons, or other normal Home Assistant entities.
@@ -119,6 +124,10 @@ To make a phone vibrate:
 
 That is all that is required for normal use.
 
+![Set ringer mode with a selected demo Pixel 9 and Vibrate mode](docs/images/action-editor.jpg)
+
+Example from Home Assistant's action editor using a demo device.
+
 The YAML equivalent is:
 
 ```yaml
@@ -129,6 +138,10 @@ data:
 ```
 
 The examples below use YAML because it is compact and easy to copy, but the normal actions also provide Home Assistant UI fields and selectors.
+
+Advanced choices, notification delivery settings, intent extras, and Find Phone repeat
+tuning are grouped in collapsed sections. Expand them when needed; YAML field names
+remain flat and unchanged.
 
 ## Available actions
 
@@ -229,18 +242,16 @@ The integration includes friendly actions for most supported tasks.
 
 Actions such as `dial_number`, `compose_sms`, `compose_email`, and `create_calendar_event` **open the appropriate Android screen**. They do not automatically place a call, send the message, send the email, or save the calendar event.
 
-### Kiosk controls
+### Deprecated kiosk actions
 
-When Companion App kiosk mode is configured, the integration also provides:
+Companion's `kiosk_*` commands are [iOS-only](https://companion.home-assistant.io/docs/integrations/ios-kiosk-mode/).
+Earlier versions incorrectly advertised them for Android. Existing action names remain
+registered so automations receive a clear error; they send no notification command.
+The raw command action also rejects these unsupported messages.
 
-- `kiosk_show_screensaver`
-- `kiosk_hide_screensaver`
-- `kiosk_show_camera`
-- `kiosk_hide_camera`
-- `kiosk_set_brightness`
-- `kiosk_set_volume`
-- `kiosk_reload`
-- `kiosk_default`
+For Android displays, use the supported brightness, volume, screen, and Companion page
+actions. See Companion's [Android Home App](https://companion.home-assistant.io/docs/integrations/android-home-app/)
+for its launcher features.
 
 ### Advanced actions
 
@@ -279,7 +290,6 @@ A common pattern is:
 | BLE and beacon monitoring | Relevant Companion sensors/settings and Android Bluetooth permissions |
 | App lock | A supported biometric or device credential |
 | Notification channels | Android 8 or newer |
-| Kiosk commands | Companion App must be in the foreground with kiosk features configured and **Accept kiosk remote commands** enabled |
 | Speak/TTS | Playback depends on Android audio state, TTS engine and Companion settings |
 
 Android 15 and newer place additional restrictions on Do Not Disturb changes. Android also increasingly restricts direct control of system features such as Bluetooth.
@@ -407,7 +417,12 @@ When a user presses a button, the integration fires:
 android_device_control_notification_action
 ```
 
-The event includes the selected logical action ID along with device/session information.
+The event includes `action_id`, `device_id`, `session_id`, and the optional `tag`.
+Text replies add `response_text`.
+
+See [complete notification examples](docs/NOTIFICATION_EXAMPLES.md) for a sending script
+using `response_variable` and an event automation that handles replies. It uses session
+IDs to keep concurrent answers distinct and listens independently of the sending script.
 
 ### Repeat until acknowledged
 
@@ -437,6 +452,8 @@ data:
 ```
 
 Repeating tasks are not resumed after a restart. Instead, the integration stores only bounded session identifiers and routing metadata, then clears stale managed notifications at startup. A late acknowledgement button remains recognizable for up to 24 hours. Prompt/yes-no/choice button mappings use the same 24-hour lifetime; notification titles and messages are not stored.
+
+The same expiry applies while Home Assistant stays running. An expired action is ignored.
 
 ## Find phone
 
@@ -519,6 +536,10 @@ Natural attempt exhaustion clears the integration notification. Cleanup stops Co
 
 ## Open, share and send things to your phone
 
+These friendly actions use Companion's activity command. Enable **Notification commands**
+and grant **Display over other apps** access for launches from the background. The
+receiving Android app must be installed and able to handle the requested activity.
+
 These actions are useful when you want an automation to put something directly in front of you on the phone.
 
 ### Open a URL
@@ -596,6 +617,12 @@ data:
   subject: Meeting notes
   body: "Hello from Home Assistant"
 ```
+
+### Create a calendar event
+
+For `create_calendar_event`, an all-day end date is exclusive. A one-day event on
+27 July starts on `2026-07-27` and ends on `2026-07-28`. Timed events accept
+timestamps with offsets; timestamps without offsets use Home Assistant's timezone.
 
 ### Open an app
 
@@ -842,7 +869,13 @@ Enable notifications in the Companion App and restart Home Assistant so the Mobi
 
 Each selected device is validated before sending. Once sending begins, devices are handled independently.
 
-If one fails after another has already succeeded, the successful phone may already have received the request. The error identifies the failed device or devices.
+Valid targets are attempted independently. If at least one succeeds, ordinary command
+actions finish and log a warning naming failed devices and their reasons. Check
+**Settings → System → Logs**. Response-capable notification/share actions also return
+per-device results when a response variable is requested.
+
+If every target fails, the action raises an error. A single invalid target retains its
+specific explanation, such as missing push support or a missing Mobile App registration.
 
 ### Find Phone does not stop immediately
 
@@ -906,6 +939,12 @@ Camera actions open a camera app. They cannot remotely capture a photograph or r
 
 A successful Home Assistant action means the request was handed to Home Assistant's Mobile App notification system.
 
+In action responses, `dispatched: true` means the underlying notify action returned.
+Mobile App can catch and log remote transport failures, including timeouts or rate
+limits, so this does not prove that the cloud accepted the request. Where supported,
+use `confirm_delivery: true` and the receipt event for evidence that Companion received
+the notification. Receipt still does not prove display or execution.
+
 It does **not** prove that:
 
 - push reached the phone immediately;
@@ -928,6 +967,12 @@ pytest
 ```
 
 The repository also runs HACS validation and hassfest in GitHub Actions.
+
+Tests run against both the minimum and current stable Home Assistant, with a weekly
+compatibility run between code changes. The Release workflow runs those checks plus
+HACS/hassfest and the [Android emulator end-to-end suite](e2e/android/README.md)
+before publishing. Tests initialize Home Assistant before importing its
+validation library, matching server startup on current versions.
 
 Implementation and protocol behaviour are based on:
 

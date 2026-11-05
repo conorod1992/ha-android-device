@@ -8,9 +8,9 @@ from homeassistant.core import HomeAssistant
 from .services import async_register_services, async_unregister_services
 
 
-async def async_setup_entry(hass: HomeAssistant, _entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Android Device Control from a config entry."""
-    async_register_services(hass)
+    async_register_services(hass, entry)
     return True
 
 

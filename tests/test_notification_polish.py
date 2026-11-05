@@ -55,7 +55,7 @@ def test_service_metadata_exposes_notification_polish(caplog) -> None:
         for record in caplog.records
     )
 
-    urgent = services["notify_urgent"]["fields"]
+    urgent = services["notify_urgent"]["fields"]["delivery_options"]["fields"]
     assert urgent["channel"]["default"] == "Urgent"
     assert urgent["importance"]["default"] == "high"
     assert urgent["importance"]["selector"]["select"]["options"] == [
@@ -67,6 +67,6 @@ def test_service_metadata_exposes_notification_polish(caplog) -> None:
     progress = services["notify_progress"]["fields"]
     assert progress["current"]["selector"]["number"]["min"] == -1
 
-    live_update = services["notify_live_update"]["fields"]
+    live_update = services["notify_live_update"]["fields"]["delivery_options"]["fields"]
     assert "channel" in live_update
     assert "importance" in live_update
